@@ -11,7 +11,7 @@
 | **Datacom DmOS** | `dmos` | **OK** | Interfaces físicas, VLANs, L3, LAGs, IPs (v4/v6), Transceivers, VRRP, VPWS/VPLS, LLDP. |
 | **Mikrotik RouterOS** | `routeros` | **OK** | Interfaces físicas, VLANs, Bridges, LAGs (Bonding), IPs (estáticos/dinâmicos/IPv6), VRRP, VPLS, LLDP, **Túneis VPN (`/vpn/tunnels/`)** (WireGuard, L2TP, PPTP, OpenVPN, SSTP). |
 | **Juniper JunOS** | `junos` | 🟡 *Pendente* | Em desenvolvimento / Planejado. |
-| **Huawei VRP** | `huawei_vrp` | **OK** | Roteadores (AR/NE), switches (S/CE) e BNG/BRAS: interfaces físicas, subinterfaces (`vlan-type dot1q`), Vlanif/LoopBack/Tunnel/Virtual-*, Eth-Trunk (LAG) e membros (`eth-trunk N`), VLANs (`vlan batch` e `vlan N` + `description`), portas access/trunk/hybrid, IPs IPv4 (máscara decimal → CIDR) e IPv6, VRRP, **VPWS (`mpls l2vc`)**, **VPLS (`vsi` + `l2 binding vsi`)** e **QinQ de assinante BNG (`user-vlan ... qinq ...`)**, LLDP. |
+| **Huawei VRP** | `huawei_vrp` | **OK** | Roteadores (AR/NE), switches (S/CE) e BNG/BRAS: interfaces físicas, subinterfaces (`vlan-type dot1q`), Vlanif/LoopBack/Tunnel/Virtual-*, Eth-Trunk (LAG) e membros (`eth-trunk N`), VLANs (`vlan batch` e `vlan N` + `description`), portas access/trunk/hybrid, IPs IPv4 (máscara decimal → CIDR) e IPv6, VRRP, **VPWS (`mpls l2vc`)**, **VPLS (`vsi` + `l2 binding vsi`)**, **QinQ de assinante BNG (`user-vlan ... qinq ...`)**, LLDP, **Transceivers de Inventário (Roteadores & Switches)**. |
 
 ---
 

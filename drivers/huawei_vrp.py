@@ -10,6 +10,8 @@ Comandos coletados via SSH (`fetch_data`):
     - display esn                      -> numero de serie do chassi
     - display device                   -> inventario de placas (fallback de modelo)
     - display lldp neighbor brief      -> vizinhos LLDP (descoberta de cabos)
+    - display interface phy-option     -> transceivers opticos em Roteadores (AR/NE)
+    - display transceiver              -> transceivers opticos em Switches (S/CE)
 
 O `parse_data` tambem aceita diretamente a string/arquivo com a saida de
 `display current-configuration` (com ou sem o cabecalho de `display version`).
@@ -26,11 +28,11 @@ Recursos extraidos para o schema padrao do NetBox Engine:
     - L2VPN: VPWS (`mpls l2vc <peer> <vc-id>`) e VPLS (`vsi` + `l2 binding vsi`)
     - BNG/BRAS: `user-vlan <ini> <fim> [qinq <svlan>]` -> QinQ (S-VLAN/C-VLANs)
     - Vizinhos LLDP (quando coletados via SSH)
+    - Transceivers opticos (Roteadores via `phy-option` [Status UP] e Switches via `transceiver`)
 
 Limitacoes conhecidas (nao fazem parte do schema sincronizado):
     - Tuneis MPLS-TE (`interface Tunnel`) sao criados como interface virtual, mas o
       mapeamento de LSPs/atributos MPLS-TE nao e enviado ao NetBox.
-    - Transceivers opticos nao sao extraidos (depende de `display transceiver`).
 """
 
 import re
@@ -49,6 +51,8 @@ DEFAULT_COMMANDS = {
     'esn': 'display esn',
     'device': 'display device',
     'lldp': 'display lldp neighbor brief',
+    'phy_option': 'display interface phy-option | no-more',
+    'transceiver': 'display transceiver | no-more',
 }
 
 # Precisao usada ao esperar o prompt do VRP: <HOST>, <HOST> ou [~HOST]
@@ -225,6 +229,8 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         device_text = self._get_output(raw_outputs, 'device', 'display device', 'device_text')
         esn_text = self._get_output(raw_outputs, 'esn', 'display esn', 'esn_text')
         lldp_text = self._get_output(raw_outputs, 'lldp', 'display lldp neighbor brief', 'lldp_text')
+        phy_option_text = self._get_output(raw_outputs, 'phy_option', 'display interface phy-option | no-more', 'phy_option_text')
+        transceiver_text = self._get_output(raw_outputs, 'transceiver', 'display transceiver | no-more', 'transceiver_text')
 
         config_text = clean_config(config_raw)
 
@@ -553,11 +559,97 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         if lldp_text:
             data['lldp_neighbors'] = self._parse_lldp_neighbors(lldp_text)
 
+        # ------------------------------------------------------------------
+        # 10. Inventory Items / Transceivers (Router & Switch)
+        # ------------------------------------------------------------------
+        if phy_option_text:
+            data['inventory_items'].extend(self._parse_transceivers_router(phy_option_text))
+        if transceiver_text:
+            data['inventory_items'].extend(self._parse_transceivers_switch(transceiver_text))
+
         return data
 
     # ------------------------------------------------------------------
     # Utilitarios internos
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_transceivers_router(phy_option_text: str) -> List[Dict[str, str]]:
+        """
+        Analisa a saida de 'display interface phy-option' (Roteadores):
+        Blocos iniciam com nome da interface (ex: 100GE0/3/0) e sao filtrados por
+        'Port Physical Status  : UP'.
+
+        Formato de saida do schema:
+            Name: Transceiver:100GE0/3/0
+            Manufacturer: YYYYYY
+            Part Id: OPT-XXXXXX
+        """
+        items: List[Dict[str, str]] = []
+        if not phy_option_text:
+            return items
+
+        # Divide a saida por blocos de interface (ex: 100GE0/3/0, GE0/1/0, XGigabitEthernet0/0/1)
+        blocks = re.split(r'\n(?=[\w\/\-]+(?:\.\d+)?\s*\n\s*Port Physical Status)', phy_option_text.replace('\r\n', '\n'))
+        for block in blocks:
+            lines = [l.strip() for l in block.splitlines() if l.strip()]
+            if not lines:
+                continue
+
+            iface_name = lines[0].split()[0]
+            status_match = re.search(r'Port Physical Status\s*:\s*(UP|DOWN)', block, re.IGNORECASE)
+            if not status_match or status_match.group(1).upper() != 'UP':
+                continue
+
+            vendor_pn = first_match(block, r'The Vendor PN is\s+(\S+)', re.IGNORECASE)
+            vendor_name = first_match(block, r'The Vendor Name is\s+(.+)', re.IGNORECASE)
+
+            if vendor_pn or vendor_name:
+                items.append({
+                    'interface': iface_name,
+                    'name': f"Transceiver:{iface_name}",
+                    'manufacturer': vendor_name or '',
+                    'part_id': vendor_pn or '',
+                    'serial': ''
+                })
+        return items
+
+    @staticmethod
+    def _parse_transceivers_switch(transceiver_text: str) -> List[Dict[str, str]]:
+        """
+        Analisa a saida de 'display transceiver' (Switches):
+        Blocos iniciam com 'XGigabitEthernet0/0/1 transceiver information:'.
+
+        Formato de saida do schema:
+            Name: Transceiver:XGigabitEthernet0/0/1
+            Manufacturer: YYYY
+            Part Id: XXXXXXXXX
+            Serial Number: ZZZZZZZZZZ
+        """
+        items: List[Dict[str, str]] = []
+        if not transceiver_text:
+            return items
+
+        # Divide por blocos de cada interface
+        blocks = re.split(r'\n(?=[\w\/\-]+\s+transceiver information:)', transceiver_text.replace('\r\n', '\n'))
+        for block in blocks:
+            header_match = re.search(r'^([\w\/\-]+)\s+transceiver information:', block, re.MULTILINE | re.IGNORECASE)
+            if not header_match:
+                continue
+            iface_name = header_match.group(1).strip()
+
+            vendor_name = first_match(block, r'Vendor Name\s*:\s*(.+)')
+            part_number = first_match(block, r'Vendor Part Number\s*:\s*(.+)')
+            serial_number = first_match(block, r'Manu\.\s*Serial Number\s*:\s*(.+)')
+
+            if vendor_name or part_number or serial_number:
+                items.append({
+                    'interface': iface_name,
+                    'name': f"Transceiver:{iface_name}",
+                    'manufacturer': vendor_name or '',
+                    'part_id': part_number or '',
+                    'serial': serial_number or ''
+                })
+        return items
     @staticmethod
     def _get_output(raw_outputs: Any, *keys: str) -> str:
         """
