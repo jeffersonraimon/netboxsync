@@ -13,6 +13,21 @@ if config.DISABLE_SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
+def safe_get(endpoint, **kwargs):
+    """
+    Realiza uma busca em endpoint do pynetbox de forma segura.
+    Se houver múltiplos objetos no NetBox (o que faria .get() lançar exceção),
+    retorna a primeira correspondência usando filter().
+    """
+    if not endpoint:
+        return None
+    try:
+        results = list(endpoint.filter(**kwargs))
+        return results[0] if results else None
+    except Exception:
+        return None
+
+
 def find_netbox_device(nb, dev_name):
     """
     Busca um equipamento no NetBox por nome exato, slug, nome insensível a maiúsculas/minúsculas,
@@ -129,7 +144,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     print(f"[*] Processando equipamento: {hostname}")
 
     # 1. Garantir VRF-Global
-    vrf_obj = nb.ipam.vrfs.get(name=vrf_name)
+    vrf_obj = safe_get(nb.ipam.vrfs, name=vrf_name)
     if not vrf_obj:
         print(f"[+] Criando VRF '{vrf_name}'...")
         vrf_obj = nb.ipam.vrfs.create(name=vrf_name, rd="65000:1", description="VRF Tabela de Roteamento Global")
@@ -149,10 +164,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
             tag_objs.append(int(tag_id))
 
     # 2.5. Garantir Site (POP) no NetBox
-    site = nb.dcim.sites.get(name=site_name)
+    site = safe_get(nb.dcim.sites, name=site_name)
     if not site:
         site_slug = re.sub(r'[^\w\-]', '_', site_name.lower()).strip('_') or "site-default"
-        site = nb.dcim.sites.get(slug=site_slug)
+        site = safe_get(nb.dcim.sites, slug=site_slug)
         if not site:
             sites_all = list(nb.dcim.sites.all())
             site = next((s for s in sites_all if s.name.lower() == site_name.lower() or s.slug == site_slug), None)
@@ -175,15 +190,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     site_id = getattr(site, 'id', getattr(site, 'pk', None))
 
     # 3. Garantir Device no NetBox
-    device = nb.dcim.devices.get(name=hostname)
+    device = safe_get(nb.dcim.devices, name=hostname)
     if not device:
         print(f"[+] Criando Device '{hostname}' no NetBox...")
         
         # 3.1 Resolver / Criar DeviceType
-        dev_type = nb.dcim.device_types.get(model=device_type_model)
+        dev_type = safe_get(nb.dcim.device_types, model=device_type_model)
         if not dev_type:
             type_slug = re.sub(r'[^\w\-]', '_', device_type_model.lower()).strip('_') or "default-model"
-            dev_type = nb.dcim.device_types.get(slug=type_slug)
+            dev_type = safe_get(nb.dcim.device_types, slug=type_slug)
             if not dev_type:
                 types_all = list(nb.dcim.device_types.all())
                 dev_type = next((t for t in types_all if t.model.lower() == device_type_model.lower() or t.slug == type_slug), None)
@@ -191,7 +206,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
         if not dev_type:
             mfg_name = data.get('manufacturer') or "Datacom"
             mfg_slug = re.sub(r'[^\w\-]', '_', mfg_name.lower()).strip('_') or "datacom"
-            mfg = nb.dcim.manufacturers.get(name=mfg_name) or nb.dcim.manufacturers.get(slug=mfg_slug)
+            mfg = safe_get(nb.dcim.manufacturers, name=mfg_name) or safe_get(nb.dcim.manufacturers, slug=mfg_slug)
             if not mfg:
                 mfgs_all = list(nb.dcim.manufacturers.all())
                 mfg = next((m for m in mfgs_all if m.name.lower() == mfg_name.lower() or m.slug == mfg_slug), mfgs_all[0] if mfgs_all else None)
@@ -216,10 +231,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     dev_type = types_all[0] if types_all else None
 
         # 3.2 Resolver / Criar DeviceRole
-        dev_role = nb.dcim.device_roles.get(name=device_role)
+        dev_role = safe_get(nb.dcim.device_roles, name=device_role)
         if not dev_role:
             role_slug = re.sub(r'[^\w\-]', '_', device_role.lower()).strip('_') or "switch"
-            dev_role = nb.dcim.device_roles.get(slug=role_slug)
+            dev_role = safe_get(nb.dcim.device_roles, slug=role_slug)
             if not dev_role:
                 roles_all = list(nb.dcim.device_roles.all())
                 dev_role = next((r for r in roles_all if r.name.lower() == device_role.lower() or r.slug == role_slug), None)
@@ -313,7 +328,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     required_roles = ["PTP-EQUIPAMENTOS", "VPWS-TUNEIS", "VPLS-TUNEIS"]
     for role_name in required_roles:
         role_slug = re.sub(r'[^\w\-]', '_', role_name.lower())
-        role_obj = nb.ipam.roles.get(name=role_name)
+        role_obj = safe_get(nb.ipam.roles, name=role_name)
         if not role_obj:
             print(f"[+] Criando VLAN Role '{role_name}' no NetBox...")
             role_obj = nb.ipam.roles.create(name=role_name, slug=role_slug)
@@ -639,7 +654,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 mfg_obj = None
                 if mfg_name:
                     slug_mfg = re.sub(r'[^\w\-]', '_', mfg_name.lower())
-                    mfg_obj = nb.dcim.manufacturers.get(name=mfg_name) or nb.dcim.manufacturers.get(slug=slug_mfg)
+                    mfg_obj = safe_get(nb.dcim.manufacturers, name=mfg_name) or safe_get(nb.dcim.manufacturers, slug=slug_mfg)
                     if not mfg_obj:
                         all_mfgs = list(nb.dcim.manufacturers.all())
                         mfg_obj = next((m for m in all_mfgs if m.name.lower() == mfg_name.lower() or m.slug == slug_mfg), None)
@@ -648,7 +663,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         try:
                             mfg_obj = nb.dcim.manufacturers.create(name=mfg_name, slug=slug_mfg)
                         except Exception as mfg_err:
-                            mfg_obj = nb.dcim.manufacturers.get(slug=slug_mfg) or nb.dcim.manufacturers.get(name=mfg_name)
+                            mfg_obj = safe_get(nb.dcim.manufacturers, slug=slug_mfg) or safe_get(nb.dcim.manufacturers, name=mfg_name)
 
                 mfg_id = getattr(mfg_obj, 'id', getattr(mfg_obj, 'pk', None)) if mfg_obj else None
 
@@ -703,7 +718,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     continue
 
                 # 1. Busca exata pelo endereço completo (ex: fd10:1:20::254/64)
-                ip_obj = nb.ipam.ip_addresses.get(address=raw_ip_str, vrf_id=vrf_id) or nb.ipam.ip_addresses.get(address=raw_ip_str)
+                ip_obj = safe_get(nb.ipam.ip_addresses, address=raw_ip_str, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=raw_ip_str)
 
                 # 2. Se não encontrou, busca por filter ignorando o prefixo da máscara (procura pelo Host IP puro ex: fd10:1:20::254)
                 if not ip_obj:
@@ -795,11 +810,11 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 vip_addr = vrrp['virtual_ip']
                 
                 # Garante que o IP virtual existe na VRF
-                ip_vrrp_obj = nb.ipam.ip_addresses.get(address=vip_addr, vrf_id=vrf_id)
+                ip_vrrp_obj = safe_get(nb.ipam.ip_addresses, address=vip_addr, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=vip_addr)
                 if not ip_vrrp_obj:
                     # Se nao tiver mascara no IP virtual, adiciona /32 ou /128
                     full_vip = vip_addr if '/' in vip_addr else (f"{vip_addr}/32" if ':' not in vip_addr else f"{vip_addr}/128")
-                    ip_vrrp_obj = nb.ipam.ip_addresses.get(address=full_vip, vrf_id=vrf_id)
+                    ip_vrrp_obj = safe_get(nb.ipam.ip_addresses, address=full_vip, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=full_vip)
                     if not ip_vrrp_obj:
                         print(f"[+] Criando IP Virtual VRRP {full_vip} no NetBox...")
                         ip_vrrp_obj = nb.ipam.ip_addresses.create(
@@ -863,7 +878,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     name = vpws['name']
                     pw_id_val = int(vpws['pw_id']) if vpws.get('pw_id') and str(vpws['pw_id']).isdigit() else None
                     slug_candidate = re.sub(r'[^\w\-]', '_', name.lower()).strip('_')
-                    l2vpn = l2vpn_endpoint.get(name=name) or l2vpn_endpoint.get(slug=slug_candidate)
+                    l2vpn = safe_get(l2vpn_endpoint, name=name) or safe_get(l2vpn_endpoint, slug=slug_candidate)
                     if not l2vpn:
                         print(f"[+] Criando L2VPN VPWS: {name} (Identifier/PW-ID: {pw_id_val})")
                         create_data = {
@@ -878,7 +893,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         try:
                             l2vpn = l2vpn_endpoint.create(**create_data)
                         except Exception as create_err:
-                            l2vpn = l2vpn_endpoint.get(slug=slug_candidate) or l2vpn_endpoint.get(name=name)
+                            l2vpn = safe_get(l2vpn_endpoint, slug=slug_candidate) or safe_get(l2vpn_endpoint, name=name)
                             if not l2vpn:
                                 print(f"[!] Erro ao criar L2VPN VPWS '{name}': {create_err}")
                                 continue
@@ -920,7 +935,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     vpls_pw_id = vpls.get('vlan_id')
                     pw_id_val = int(vpls_pw_id) if vpls_pw_id and str(vpls_pw_id).isdigit() else None
                     slug_candidate = re.sub(r'[^\w\-]', '_', name.lower()).strip('_')
-                    l2vpn = l2vpn_endpoint.get(name=name) or l2vpn_endpoint.get(slug=slug_candidate)
+                    l2vpn = safe_get(l2vpn_endpoint, name=name) or safe_get(l2vpn_endpoint, slug=slug_candidate)
                     if not l2vpn:
                         print(f"[+] Criando L2VPN VPLS: {name} (Identifier/PW-ID: {pw_id_val})")
                         create_data = {
@@ -935,7 +950,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         try:
                             l2vpn = l2vpn_endpoint.create(**create_data)
                         except Exception as create_err:
-                            l2vpn = l2vpn_endpoint.get(slug=slug_candidate) or l2vpn_endpoint.get(name=name)
+                            l2vpn = safe_get(l2vpn_endpoint, slug=slug_candidate) or safe_get(l2vpn_endpoint, name=name)
                             if not l2vpn:
                                 print(f"[!] Erro ao criar L2VPN VPLS '{name}': {create_err}")
                                 continue

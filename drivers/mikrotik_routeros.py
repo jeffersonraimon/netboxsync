@@ -64,8 +64,8 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
         0 R name="ether1" mtu=1500 disabled=no ...
         Retorna dicionário {chave: valor}.
         """
-        # Remove flags/número inicial se houver
-        # Ex: " 0 R  name=ether1 address=1.2.3.4/24"
+        # Remove prompts residuais do RouterOS (ex: <user@host] > ou [user@host] >)
+        line = re.sub(r'[<\[][\w\.\-]+@[^\]>\s]+[\]>]?\s*>?', '', line)
         fields = {}
         # Regex para capturar k=v onde v pode ser "string com espaço" ou sem aspas
         matches = re.findall(r'([\w\-]+)=(?:"([^"]*)"|([^\s]+))', line)
@@ -81,6 +81,11 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
         """
         if not text:
             return ""
+        # Remove sequências de escape ANSI
+        text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+        # Remove prompts do RouterOS como <user@host] > ou [user@host] >
+        text = re.sub(r'[<\[][\w\.\-]+@[^\]>\s]+[\]>]?\s*>?', '', text)
+
         lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         unwrapped = []
         for line in lines:
@@ -435,14 +440,17 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
                 if vname and not any(l['name'] == vname for l in data['interfaces_l3']):
                     data['interfaces_l3'].append({'name': vname, 'vlan': None, 'parent': iface, 'type': 'virtual'})
                 if vrid and iface:
-                    data['vrrp_groups'].append({
-                        'interface': iface,
-                        'address_family': 'ipv4',
-                        'vr_id': int(vrid),
-                        'virtual_ip': fields.get('version', ''),
-                        'priority': int(prio) if prio.isdigit() else 100,
-                        'version': fields.get('version', 'v3')
-                    })
+                    vrid_match = re.search(r'\d+', str(vrid))
+                    prio_match = re.search(r'\d+', str(prio))
+                    if vrid_match:
+                        data['vrrp_groups'].append({
+                            'interface': iface,
+                            'address_family': 'ipv4',
+                            'vr_id': int(vrid_match.group(0)),
+                            'virtual_ip': fields.get('version', ''),
+                            'priority': int(prio_match.group(0)) if prio_match else 100,
+                            'version': fields.get('version', 'v3')
+                        })
 
         # 9. VPLS Tunnels (/interface vpls print terse)
         vpls_out = get_output_for("/interface vpls") or export_out
