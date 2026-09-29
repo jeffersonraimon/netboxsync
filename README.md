@@ -4,17 +4,28 @@
 
 ---
 
+## 🚦 Status dos Drivers de Fabricante (Vendor Compatibility)
+
+| Fabricante / Sistema Operacional | Slug CLI (`--driver`) | Status de Suporte | Recursos Suportados |
+| :--- | :--- | :---: | :--- |
+| **Datacom DmOS** | `dmos` | **OK** | Interfaces físicas, VLANs, L3, LAGs, IPs (v4/v6), Transceivers, VRRP, VPWS/VPLS, LLDP. |
+| **Mikrotik RouterOS** | `routeros` | **OK** | Interfaces físicas, VLANs, Bridges, LAGs (Bonding), IPs (estáticos/dinâmicos/IPv6), VRRP, VPLS, LLDP, **Túneis VPN (`/vpn/tunnels/`)** (WireGuard, L2TP, PPTP, OpenVPN, SSTP). |
+| **Juniper JunOS** | `junos` | 🟡 *Pendente* | Em desenvolvimento / Planejado. |
+| **Huawei VRP** | `huawei_vrp` | 🟡 *Pendente* | Em desenvolvimento / Planejado. |
+
+---
+
 ## 🚀 Capacidades & Funcionalidades Atualizadas
 
 ### 1. 🔌 Arquitetura Multimarcas (Multi-Vendor Drivers)
-- **Extensível por Design**: Suporte desacoplado a múltiplos sistemas operacionais de rede (Datacom DmOS, Cisco IOS/NX-OS, Huawei VRP, Juniper JunOS, Mikrotik RouterOS, etc.).
+- **Extensível por Design**: Suporte desacoplado a múltiplos sistemas operacionais de rede através dos padrões de projeto *Strategy* e *Factory Registry*.
 - **Fábrica de Drivers (`drivers/registry.py`)**: Carregamento dinâmico de drivers via CLI com a flag `--driver <slug>`.
 - **Boilerplate Documentado (`drivers/template_driver.py`)**: Guia passo a passo e estrutura padrão para inclusão rápida de novos fabricantes.
 
 ---
 
 ### 2. 📥 Métodos de Ingestão Flexíveis
-- **Arquivo Local (`--file` / `-f`)**: Leitura direta de arquivos contendo a saída de comandos de configuração (ex: `show running-config`).
+- **Arquivo Local (`--file` / `-f`)**: Leitura direta de arquivos contendo a saída de comandos de configuração (ex: `show running-config` ou `export terse`).
 - **Conexão SSH Single Host (`--host` / `-H`)**: Conexão interativa via SSH a um equipamento específico.
 - **Conexão SSH em Lote (`--hosts-file` / `-F`)**: Processamento em lote de múltiplos equipamentos listados em um arquivo texto (um IP/Host por linha).
 
@@ -27,12 +38,13 @@
 | **Dispositivos (Devices)** | Criação e atualização de equipamentos com suporte a `serial`, `model`, `site` (POP), `role`, `tags` e timestamp nos comentários de auditoria. |
 | **Sites / POPs** | Criação e associação automática de Sites (POPs) no NetBox caso ainda não existam. |
 | **VLANs & Roles** | Sincronização de VLANs globais, reativação de VLANs inativas e categorização por Roles (`PTP-EQUIPAMENTOS`, `VPWS-TUNEIS`, `VPLS-TUNEIS`). |
-| **Interfaces** | Mapeamento automático de tipos de interface (`100gbase-x-qsfp28`, `10gbase-x-sfpp`, `25gbase-x-sfp28`, `40gbase-x-qsfpp`, `1000base-t`, `lag`, `virtual`). Configuração de modos Access/Tagged e amarração de membros às LAGs. |
+| **Interfaces** | Mapeamento automático de tipos de interface (`100gbase-x-qsfp28`, `10gbase-x-sfpp`, `25gbase-x-sfp28`, `40gbase-x-qsfpp`, `1000base-t`, `lag`, `bridge`, `virtual`). Configuração de modos Access/Tagged, amarração de membros a LAGs/Bridges e interfaces pai (*Parent Interfaces*). |
+| **Túneis VPN (`/vpn/tunnels/`)** | Criação e sincronização automática de Túneis VPN no aplicativo NetBox VPN (3.5+) com mapeamento de **Encapsulation** (`wireguard`, `l2tp`, `pptp`, `openvpn`, `sstp`), status, descrição e associação de terminação (`Tunnel Termination`) no equipamento e interfaces. |
 | **Transceivers / Inventário** | Extração de informações de transceivers ópticos (Vendor, Part Number, Serial) e vinculação aos fabricantes e interfaces físicas no NetBox. |
-| **Endereços IP & VRF** | Cadastro de IPs IPv4 e IPv6 vinculados às interfaces físicas, subinterfaces L3 e Loopbacks na VRF Global, com atribuição automática do IP primário do dispositivo. |
+| **Endereços IP & VRF** | Cadastro de IPs IPv4 e IPv6 (estáticos e dinâmicos) vinculados às interfaces físicas, subinterfaces L3 e Loopbacks na VRF Global, com resolução dinâmica de máscaras (CIDR) e atribuição automática do IP primário do dispositivo. |
 | **VRRP / FHRP Groups** | Criação e atualização de grupos FHRP (VRRPv2/v3), IP virtual no NetBox IPAM, prioridades e associação às interfaces físicas/L3. |
 | **Circuitos L2VPN (VPWS / VPLS)** | Sincronização de túneis VPWS e VPLS no aplicativo VPN do NetBox (3.5+), atribuição de PW-IDs (identifiers) e terminadores em S-VLANs e C-VLANs para topologias Q-in-Q. |
-| **Descoberta de Cabos (Cables)** | Conexão automática de cabos entre dispositivos no NetBox utilizando vizinhos LLDP (`show lldp neighbors`) e fallback por descrições de interface. |
+| **Descoberta de Cabos (Cables)** | Conexão automática de cabos entre dispositivos no NetBox utilizando vizinhos LLDP (`show lldp neighbors` / `/ip neighbor print terse`) e fallback por descrições de interface. |
 
 ---
 
@@ -103,9 +115,14 @@ python3 main.py --host 192.168.1.1 -u admin -p MinhaSenha --driver dmos
 python3 main.py --hosts-file lista_switches.txt -u admin --driver dmos
 ```
 
-### 4. Sincronizar apenas módulos específicos (ex: VLANs, Interfaces e IPs)
+### 4. Sincronizar equipamento Mikrotik RouterOS (com porta SSH customizada)
 ```bash
-python3 main.py --host 10.0.0.1 -u admin --sync-modules vlans,interfaces,ips
+python3 main.py --host 192.168.1.1 -P 2269 -u admin -p MinhaSenha --driver routeros --device-type "E50UG"
+```
+
+### 5. Sincronizar apenas módulos específicos (ex: IPs e Túneis VPN)
+```bash
+python3 main.py --host 10.0.0.1 -u admin --driver routeros --sync-modules ips,vpn_tunnels
 ```
 
 ---
