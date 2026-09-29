@@ -66,10 +66,17 @@ class SSHClientSession:
                     break
             time.sleep(0.2)
 
-    def send_command(self, command, expect_regex=r'[\r\n][\w\.\-]+[#>]', timeout=60):
+    def send_command(self, command, expect_regex=r'[\r\n][\w\.\-]+[#>]\s*$', timeout=60):
         """Envia um comando para o shell interativo e aguarda a resposta até o prompt."""
         if not command.endswith('\n'):
             command += '\n'
+
+        # Limpa qualquer dado residual do buffer SSH antes de enviar o novo comando
+        while self.channel and self.channel.recv_ready():
+            try:
+                self.channel.recv(16384)
+            except Exception:
+                break
 
         self.channel.send(command)
         buf = ""

@@ -378,109 +378,149 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
         all_interfaces = data['lags'] + data['interfaces_physical'] + data['interfaces_l3']
         for iface in all_interfaces:
             if_name = iface['name']
-            
-            # Tenta casar pelo nome ou variacao de traco/espaco para nao duplicar
-            nb_iface = existing_ifaces_map.get(if_name) or existing_ifaces_map.get(if_name.replace(" ", "-")) or existing_ifaces_map.get(if_name.replace("-", " "))
+            try:
+                # Tenta casar pelo nome ou variacao de traco/espaco para nao duplicar
+                nb_iface = existing_ifaces_map.get(if_name) or existing_ifaces_map.get(if_name.replace(" ", "-")) or existing_ifaces_map.get(if_name.replace("-", " "))
 
-            is_l3_subif = any(l3['name'] == if_name for l3 in data['interfaces_l3'])
-            if is_l3_subif:
-                l3_obj = next(l3 for l3 in data['interfaces_l3'] if l3['name'] == if_name)
-                if_type = l3_obj.get('type') or (driver.normalize_interface_type(if_name) if driver else ('bridge' if 'bridge' in if_name.lower() else 'virtual'))
-            elif driver:
-                if_type = driver.normalize_interface_type(if_name)
-            elif 'lag' in if_name:
-                if_type = 'lag'
-            elif 'l3-' in if_name or 'loopback' in if_name:
-                if_type = 'virtual'
-            elif 'hundred' in if_name:
-                if_type = '100gbase-x-qsfp28'
-            elif 'twenty-five' in if_name or '25g' in if_name:
-                if_type = '25gbase-x-sfp28'
-            elif 'forty' in if_name:
-                if_type = '40gbase-x-qsfpp'
-            elif 'gigabit-ethernet' in if_name and 'ten' not in if_name and 'hundred' not in if_name and 'twenty' not in if_name:
-                if_type = '1000base-t'
-            else:
-                if_type = '10gbase-x-sfpp'
+                is_l3_subif = any(l3['name'] == if_name for l3 in data['interfaces_l3'])
+                if is_l3_subif:
+                    l3_obj = next(l3 for l3 in data['interfaces_l3'] if l3['name'] == if_name)
+                    if_type = l3_obj.get('type') or (driver.normalize_interface_type(if_name) if driver else ('bridge' if 'bridge' in if_name.lower() else 'virtual'))
+                elif driver:
+                    if_type = driver.normalize_interface_type(if_name)
+                elif 'lag' in if_name:
+                    if_type = 'lag'
+                elif 'l3-' in if_name or 'loopback' in if_name:
+                    if_type = 'virtual'
+                elif 'hundred' in if_name:
+                    if_type = '100gbase-x-qsfp28'
+                elif 'twenty-five' in if_name or '25g' in if_name:
+                    if_type = '25gbase-x-sfp28'
+                elif 'forty' in if_name:
+                    if_type = '40gbase-x-qsfpp'
+                elif 'gigabit-ethernet' in if_name and 'ten' not in if_name and 'hundred' not in if_name and 'twenty' not in if_name:
+                    if_type = '1000base-t'
+                else:
+                    if_type = '10gbase-x-sfpp'
 
-            if_desc = iface.get('description', '')
+                if_desc = iface.get('description', '')
 
-            if not nb_iface:
-                print(f"[+] Criando Interface {if_name} no NetBox...")
-                nb_iface = nb.dcim.interfaces.create(
-                    device=device_id,
-                    name=if_name,
-                    type=if_type,
-                    label=if_desc,
-                    description=if_desc,
-                    enabled=iface.get('enabled', True),
-                    mtu=iface.get('mtu')
-                )
-                existing_ifaces_map[if_name] = nb_iface
-            else:
-                need_save = False
-                cur_type = getattr(nb_iface.type, 'value', str(nb_iface.type or ''))
-                if cur_type != if_type:
-                    print(f"[➔] Atualizando tipo da interface {nb_iface.name} no NetBox: {cur_type} -> {if_type}")
-                    nb_iface.type = if_type
-                    need_save = True
-                if nb_iface.enabled != iface.get('enabled', True):
-                    nb_iface.enabled = iface.get('enabled', True)
-                    need_save = True
-                if nb_iface.label != if_desc:
-                    nb_iface.label = if_desc
-                    need_save = True
-                if nb_iface.description != if_desc:
-                    nb_iface.description = if_desc
-                    need_save = True
-                if iface.get('mtu') and nb_iface.mtu != iface.get('mtu'):
-                    nb_iface.mtu = iface.get('mtu')
-                    need_save = True
-                if need_save:
-                    nb_iface.save()
+                if not nb_iface:
+                    print(f"[+] Criando Interface {if_name} no NetBox...")
+                    nb_iface = nb.dcim.interfaces.create(
+                        device=device_id,
+                        name=if_name,
+                        type=if_type,
+                        label=if_desc,
+                        description=if_desc,
+                        enabled=iface.get('enabled', True),
+                        mtu=iface.get('mtu')
+                    )
+                    existing_ifaces_map[if_name] = nb_iface
+                else:
+                    need_save = False
+                    cur_type = getattr(nb_iface.type, 'value', str(nb_iface.type or ''))
+                    if cur_type != if_type:
+                        print(f"[➔] Atualizando tipo da interface {nb_iface.name} no NetBox: {cur_type} -> {if_type}")
+                        nb_iface.type = if_type
+                        need_save = True
+                    if nb_iface.enabled != iface.get('enabled', True):
+                        nb_iface.enabled = iface.get('enabled', True)
+                        need_save = True
+                    if nb_iface.label != if_desc:
+                        nb_iface.label = if_desc
+                        need_save = True
+                    if nb_iface.description != if_desc:
+                        nb_iface.description = if_desc
+                        need_save = True
+                    if iface.get('mtu') and nb_iface.mtu != iface.get('mtu'):
+                        nb_iface.mtu = iface.get('mtu')
+                        need_save = True
+                    if need_save:
+                        try:
+                            nb_iface.save()
+                        except Exception as save_err:
+                            print(f"[!] Aviso ao salvar dados da interface {nb_iface.name}: {save_err}")
 
-            if nb_iface:
-                # Busca VLANs vinculadas testando variações do nome da interface (espaço vs hífen)
-                vlan_ids = data['interface_vlans'].get(if_name) or data['interface_vlans'].get(if_name.replace(" ", "-")) or data['interface_vlans'].get(if_name.replace("-", " "))
-                if vlan_ids:
-                    vlan_target_ids = []
-                    for v in vlan_ids:
-                        v_obj = nb_vlans.get(v)
-                        if not v_obj:
-                            v_found = list(nb.ipam.vlans.filter(vid=v, site_id='null')) or list(nb.ipam.vlans.filter(vid=v))
-                            v_obj = v_found[0] if v_found else None
+                if nb_iface:
+                    # Busca VLANs vinculadas testando variações do nome da interface (espaço vs hífen)
+                    vlan_ids = data['interface_vlans'].get(if_name) or data['interface_vlans'].get(if_name.replace(" ", "-")) or data['interface_vlans'].get(if_name.replace("-", " "))
+                    untagged_vid = data.get('interface_untagged_vlans', {}).get(if_name) or data.get('interface_untagged_vlans', {}).get(if_name.replace(" ", "-")) or data.get('interface_untagged_vlans', {}).get(if_name.replace("-", " "))
 
-                        if not v_obj:
-                            vname = data['vlans'].get(v, f"VLAN-{v}")
-                            target_role_name = data.get('vlan_roles_map', {}).get(v)
+                    # 1. Resolve VLAN untagged no NetBox se informada
+                    untagged_target_id = None
+                    if untagged_vid:
+                        u_obj = nb_vlans.get(untagged_vid)
+                        if not u_obj:
+                            u_found = list(nb.ipam.vlans.filter(vid=untagged_vid, site_id='null')) or list(nb.ipam.vlans.filter(vid=untagged_vid))
+                            u_obj = u_found[0] if u_found else None
+
+                        if not u_obj:
+                            vname = data['vlans'].get(untagged_vid, f"VLAN-{untagged_vid}")
+                            target_role_name = data.get('vlan_roles_map', {}).get(untagged_vid)
                             target_role_id = vlan_roles_cache.get(target_role_name) if target_role_name else None
-                            print(f"[+] Criando VLAN {v} - {vname} (Global) no NetBox...")
+                            print(f"[+] Criando VLAN {untagged_vid} - {vname} (Global) no NetBox...")
                             try:
-                                v_kwargs = {'vid': v, 'name': vname, 'status': 'active'}
+                                v_kwargs = {'vid': untagged_vid, 'name': vname, 'status': 'active'}
                                 if target_role_id:
                                     v_kwargs['role'] = target_role_id
-                                v_obj = nb.ipam.vlans.create(**v_kwargs)
+                                u_obj = nb.ipam.vlans.create(**v_kwargs)
                             except Exception:
+                                u_found = list(nb.ipam.vlans.filter(vid=untagged_vid, site_id='null')) or list(nb.ipam.vlans.filter(vid=untagged_vid))
+                                u_obj = u_found[0] if u_found else None
+
+                        if u_obj:
+                            nb_vlans[untagged_vid] = u_obj
+                            u_id = getattr(u_obj, 'id', getattr(u_obj, 'pk', None))
+                            if u_id is not None:
+                                untagged_target_id = int(u_id)
+
+                    # 2. Resolve VLANs tagged no NetBox se informadas
+                    vlan_target_ids = []
+                    if vlan_ids:
+                        for v in vlan_ids:
+                            v_obj = nb_vlans.get(v)
+                            if not v_obj:
                                 v_found = list(nb.ipam.vlans.filter(vid=v, site_id='null')) or list(nb.ipam.vlans.filter(vid=v))
                                 v_obj = v_found[0] if v_found else None
-                        if v_obj:
-                            nb_vlans[v] = v_obj
-                            v_id = getattr(v_obj, 'id', getattr(v_obj, 'pk', None))
-                            if v_id is not None:
-                                vlan_target_ids.append(int(v_id))
+
+                            if not v_obj:
+                                vname = data['vlans'].get(v, f"VLAN-{v}")
+                                target_role_name = data.get('vlan_roles_map', {}).get(v)
+                                target_role_id = vlan_roles_cache.get(target_role_name) if target_role_name else None
+                                print(f"[+] Criando VLAN {v} - {vname} (Global) no NetBox...")
+                                try:
+                                    v_kwargs = {'vid': v, 'name': vname, 'status': 'active'}
+                                    if target_role_id:
+                                        v_kwargs['role'] = target_role_id
+                                    v_obj = nb.ipam.vlans.create(**v_kwargs)
+                                except Exception:
+                                    v_found = list(nb.ipam.vlans.filter(vid=v, site_id='null')) or list(nb.ipam.vlans.filter(vid=v))
+                                    v_obj = v_found[0] if v_found else None
+                            if v_obj:
+                                nb_vlans[v] = v_obj
+                                v_id = getattr(v_obj, 'id', getattr(v_obj, 'pk', None))
+                                if v_id is not None:
+                                    vlan_target_ids.append(int(v_id))
 
                     if is_l3_subif and (if_type == 'virtual' or 'l3-' in if_name):
-                        target_untagged = vlan_target_ids[0] if vlan_target_ids else None
+                        target_untagged = untagged_target_id or (vlan_target_ids[0] if vlan_target_ids else None)
                         cur_untagged = getattr(nb_iface.untagged_vlan, 'id', getattr(nb_iface.untagged_vlan, 'pk', nb_iface.untagged_vlan))
                         if target_untagged and cur_untagged != target_untagged:
                             nb_iface.untagged_vlan = target_untagged
                             nb_iface.mode = 'access'
-                            nb_iface.save()
-                            print(f"[➔] Interface L3 {nb_iface.name} associada à VLAN: {list(vlan_ids)}")
+                            try:
+                                nb_iface.save()
+                                print(f"[➔] Interface L3 {nb_iface.name} associada à VLAN: {untagged_vid or list(vlan_ids)}")
+                            except Exception as l3_save_err:
+                                print(f"[!] Aviso ao salvar VLAN na interface L3 {nb_iface.name}: {l3_save_err}")
                     else:
                         cur_mode_raw = getattr(nb_iface, 'mode', None)
                         cur_mode = getattr(cur_mode_raw, 'value', str(cur_mode_raw or '')).lower()
                         
+                        cur_untagged_raw = getattr(nb_iface, 'untagged_vlan', None)
+                        cur_untagged_id = getattr(cur_untagged_raw, 'id', getattr(cur_untagged_raw, 'pk', cur_untagged_raw))
+
                         raw_tagged = getattr(nb_iface, 'tagged_vlans', []) or []
                         cur_tagged = []
                         for v_item in raw_tagged:
@@ -492,19 +532,49 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         cur_tagged_set = set(int(x) for x in cur_tagged if x is not None and str(x).isdigit())
                         target_tagged_set = set(int(x) for x in vlan_target_ids if str(x).isdigit())
 
-                        if cur_mode != 'tagged' or cur_tagged_set != target_tagged_set:
-                            print(f"[➔] Interface {nb_iface.name} configurada com Mode: Tagged | VLANs: {list(vlan_ids)}")
-                            nb_iface.mode = 'tagged'
-                            nb_iface.tagged_vlans = list(target_tagged_set)
+                        if target_tagged_set:
+                            target_mode = 'tagged'
+                        elif untagged_target_id:
+                            target_mode = 'access'
+                        else:
+                            target_mode = None
+
+                        if cur_mode != target_mode or cur_untagged_id != untagged_target_id or cur_tagged_set != target_tagged_set:
+                            log_info = []
+                            if target_mode:
+                                log_info.append(f"Mode: {target_mode.capitalize()}")
+                            if untagged_vid:
+                                log_info.append(f"Untagged: {untagged_vid}")
+                            if vlan_ids:
+                                log_info.append(f"Tagged: {list(vlan_ids)}")
+                            print(f"[➔] Interface {nb_iface.name} configurada com " + " | ".join(log_info if log_info else ["Mode: None"]))
+
                             try:
-                                nb_iface.save()
+                                if target_mode == 'tagged':
+                                    nb_iface.mode = 'tagged'
+                                    nb_iface.untagged_vlan = untagged_target_id
+                                    nb_iface.tagged_vlans = list(target_tagged_set)
+                                    nb_iface.save()
+                                elif target_mode == 'access':
+                                    if cur_mode == 'tagged' and cur_tagged_set:
+                                        nb_iface.mode = 'tagged'
+                                        nb_iface.tagged_vlans = []
+                                        nb_iface.save()
+                                    nb_iface.mode = 'access'
+                                    nb_iface.untagged_vlan = untagged_target_id
+                                    nb_iface.save()
+                                else:
+                                    if cur_mode == 'tagged' and cur_tagged_set:
+                                        nb_iface.mode = 'tagged'
+                                        nb_iface.tagged_vlans = []
+                                        nb_iface.save()
+                                    nb_iface.mode = None
+                                    nb_iface.untagged_vlan = None
+                                    nb_iface.save()
                             except Exception as tag_err:
-                                print(f"[!] Erro ao salvar tagged VLANs em {nb_iface.name}: {tag_err}")
-                else:
-                    if getattr(nb_iface, 'mode', None) == 'tagged':
-                        nb_iface.mode = None
-                        nb_iface.tagged_vlans = []
-                        nb_iface.save()
+                                print(f"[!] Aviso ao salvar VLANs em {nb_iface.name}: {tag_err}")
+            except Exception as iface_err:
+                print(f"[!] Erro genérico ao processar interface {if_name}: {iface_err}")
 
         # Atribuir parent interface para subinterfaces L3 (ex: VLANs, VRRP, VPLS)
         for l3_if in data['interfaces_l3']:

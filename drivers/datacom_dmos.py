@@ -15,6 +15,42 @@ from drivers.registry import register_driver
 from utils.ssh_client import SSHClientSession
 
 
+def fix_dmos_json(raw_json):
+    """
+    Corrige o JSON malformado do DmOS CLI (falta de vírgulas, colchetes, etc.) para permitir json.loads.
+    """
+    if not raw_json or not isinstance(raw_json, str):
+        return None
+    start = raw_json.find('{')
+    end = raw_json.rfind('}')
+    if start == -1 or end == -1:
+        return None
+    clean_json = raw_json[start:end+1]
+
+    lines = clean_json.splitlines()
+    fixed_lines = []
+    for i in range(len(lines)):
+        curr_line = lines[i]
+        fixed_lines.append(curr_line)
+        if i + 1 < len(lines):
+            next_line = lines[i + 1]
+            stripped_next = next_line.strip()
+            stripped_curr = curr_line.strip()
+            if stripped_next.startswith('"') and ':' in stripped_next:
+                if stripped_curr and not stripped_curr.endswith(',') and not stripped_curr.endswith('{') and not stripped_curr.endswith('['):
+                    fixed_lines[-1] = curr_line + ','
+
+    repaired_str = '\n'.join(fixed_lines)
+    try:
+        return json.loads(repaired_str)
+    except Exception:
+        try:
+            repaired_str2 = re.sub(r'(\s*[\}\]\"]\s*)[\r\n]+(\s*\"[^\"]+\"\s*:)', r'\1,\n\2', clean_json)
+            return json.loads(repaired_str2)
+        except Exception:
+            return None
+
+
 @register_driver('dmos')
 class DatacomDmOSDriver(BaseDeviceDriver):
     driver_name = "Datacom DmOS Driver"
@@ -37,53 +73,28 @@ class DatacomDmOSDriver(BaseDeviceDriver):
 
         try:
             session.connect()
-            channel = session.channel
-
             # Desabilita paginação no DmOS
-            channel.send("paginate false\n")
-            time.sleep(0.5)
-            if channel.recv_ready():
-                session._log(channel.recv(4096).decode('utf-8', errors='ignore'))
+            session.send_command("paginate false", timeout=10)
+
+            prompt_regex = r'[\r\n][\w\.\-]+[#>]\s*$'
 
             for cmd in commands:
-                # 1. Executa versão JSON do comando
-                json_cmd = f"{cmd} | display json | nomore\n"
-                print(f"  [➔] Executando comando: {cmd} | display json | nomore")
-                channel.send(json_cmd)
-
-                buf_json = ""
-                cmd_start = time.time()
-                while time.time() - cmd_start < 60:
-                    if channel.recv_ready():
-                        chunk = channel.recv(16384).decode('utf-8', errors='ignore')
-                        buf_json += chunk
-                        session._log(chunk)
-                        if re.search(r'[\r\n][\w\.\-]+[#>]', buf_json):
-                            break
-                    else:
-                        time.sleep(0.2)
-
-                if "{" in buf_json and "Error" not in buf_json and "Unknown" not in buf_json:
-                    outputs[f"{cmd}_json"] = buf_json
-
-                # 2. Executa versão texto do comando
-                text_cmd = f"{cmd} | nomore\n"
-                print(f"  [➔] Executando comando: {cmd} | nomore")
-                channel.send(text_cmd)
-
-                buf_text = ""
-                cmd_start = time.time()
-                while time.time() - cmd_start < 60:
-                    if channel.recv_ready():
-                        chunk = channel.recv(16384).decode('utf-8', errors='ignore')
-                        buf_text += chunk
-                        session._log(chunk)
-                        if re.search(r'[\r\n][\w\.\-]+[#>]', buf_text):
-                            break
-                    else:
-                        time.sleep(0.2)
-
+                # 1. Executa versão texto do comando (mais rápida e confiável)
+                # running-config em OLTs com GPON pode demorar até 120-180s
+                cmd_timeout = 180 if "running-config" in cmd else 60
+                text_cmd = f"{cmd} | nomore"
+                print(f"  [➔] Executando comando: {text_cmd}")
+                buf_text = session.send_command(text_cmd, expect_regex=prompt_regex, timeout=cmd_timeout)
                 outputs[cmd] = buf_text
+
+                # 2. Executa versão JSON apenas para comandos que se beneficiam de JSON leve
+                # Evita rodar display json no running-config para evitar estouro de buffer e desincronia no SSH
+                if "running-config" not in cmd:
+                    json_cmd = f"{cmd} | display json | nomore"
+                    print(f"  [➔] Executando comando: {json_cmd}")
+                    buf_json = session.send_command(json_cmd, expect_regex=prompt_regex, timeout=cmd_timeout)
+                    if "{" in buf_json and "Error" not in buf_json and "Unknown" not in buf_json:
+                        outputs[f"{cmd}_json"] = buf_json
 
         finally:
             session.close()
@@ -141,6 +152,7 @@ class DatacomDmOSDriver(BaseDeviceDriver):
             'vpws': [],
             'vpls': [],
             'interface_vlans': {},  # iface_name -> set(vlan_ids)
+            'interface_untagged_vlans': {},  # iface_name -> untagged_vlan_id (int)
             'inventory_items': [],  # list of transceiver inventory dicts
             'vrrp_groups': [],      # list of VRRP group dicts
             'lldp_neighbors': [],   # list of LLDP neighbor dicts
@@ -154,29 +166,48 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                      re.search(r'system\s+hostname\s+([^\s\n\r]+)', config_text, re.IGNORECASE)
         if match_host:
             data['hostname'] = match_host.group(1).strip()
-        elif json_payload and json_payload.get('config'):
-            try:
-                cfg_json = json.loads(json_payload['config']) if isinstance(json_payload['config'], str) else json_payload['config']
-                def _find_hostname_in_dict(obj):
-                    if isinstance(obj, dict):
-                        if 'hostname' in obj and isinstance(obj['hostname'], str):
-                            return obj['hostname']
-                        for v in obj.values():
-                            res = _find_hostname_in_dict(v)
-                            if res:
-                                return res
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            res = _find_hostname_in_dict(item)
-                            if res:
-                                return res
-                    return None
 
-                found_host = _find_hostname_in_dict(cfg_json)
-                if found_host:
-                    data['hostname'] = str(found_host).strip()
+        # Fallback 1: via JSON com saneamento de JSON DmOS
+        if not data['hostname'] and json_payload and json_payload.get('config'):
+            try:
+                raw_cfg = json_payload['config']
+                cfg_json = fix_dmos_json(raw_cfg) if isinstance(raw_cfg, str) else raw_cfg
+                if cfg_json:
+                    def _find_hostname_in_dict(obj):
+                        if isinstance(obj, dict):
+                            if 'hostname' in obj and isinstance(obj['hostname'], str):
+                                return obj['hostname']
+                            for v in obj.values():
+                                res = _find_hostname_in_dict(v)
+                                if res:
+                                    return res
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                res = _find_hostname_in_dict(item)
+                                if res:
+                                    return res
+                        return None
+
+                    found_host = _find_hostname_in_dict(cfg_json)
+                    if found_host:
+                        data['hostname'] = str(found_host).strip()
             except Exception:
                 pass
+
+        # Fallback 2: via Prompt SSH nos logs/saídas do equipamento (ex: OLT-CA#)
+        if not data['hostname']:
+            all_str = ""
+            if isinstance(raw_outputs, dict):
+                all_str = "\n".join([str(v) for v in raw_outputs.values()])
+            elif isinstance(raw_outputs, str):
+                all_str = raw_outputs
+            
+            prompt_match = re.search(r'[\r\n]([\w\.\-]+)[#>]', all_str) or \
+                           re.search(r'^([\w\.\-]+)[#>]', all_str, re.MULTILINE)
+            if prompt_match:
+                candidate = prompt_match.group(1).strip()
+                if candidate.lower() not in ['dmos', 'welcome', 'login', 'user', 'password']:
+                    data['hostname'] = candidate
 
         # 2. Numero de Serie, Modelo e Inventory Items via Inventory / Platform
         if inventory_text:
@@ -355,29 +386,77 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                                 'remote_interface': remote_iface
                             })
 
+        def parse_vlan_range(vlan_str):
+            vlans = []
+            for part in vlan_str.split(','):
+                part = part.strip()
+                if '-' in part:
+                    try:
+                        start, end = part.split('-')
+                        vlans.extend(range(int(start), int(end) + 1))
+                    except ValueError:
+                        pass
+                elif part.isdigit():
+                    vlans.append(int(part))
+            return vlans
+
         def add_iface_vlan(iface_name, vlan_id):
             if not iface_name:
                 return
             iface_formatted = iface_name.replace("ten-gigabit-ethernet ", "ten-gigabit-ethernet-") \
                                         .replace("hundred-gigabit-ethernet ", "hundred-gigabit-ethernet-") \
+                                        .replace("gigabit-ethernet ", "gigabit-ethernet-") \
                                         .replace("lag ", "lag-")
             if iface_formatted not in data['interface_vlans']:
                 data['interface_vlans'][iface_formatted] = set()
             data['interface_vlans'][iface_formatted].add(int(vlan_id))
 
-        # 4. VLANs nativas do bloco dot1q
-        vlan_block = re.search(r'dot1q\n(.*?)(?=\n!\n|\n[a-z])', config_text, re.DOTALL)
-        if vlan_block:
-            vlan_sub_blocks = re.findall(r'vlan\s+(\d+)(.*?)(?=vlan\s+\d+|\Z)', vlan_block.group(1), re.DOTALL)
-            for vid_str, content in vlan_sub_blocks:
-                vid = int(vid_str)
-                name_match = re.search(r'name\s+(.+)', content)
-                if name_match:
-                    data['vlans'][vid] = name_match.group(1).strip()
+        def add_iface_untagged_vlan(iface_name, vlan_id):
+            if not iface_name:
+                return
+            iface_formatted = iface_name.replace("ten-gigabit-ethernet ", "ten-gigabit-ethernet-") \
+                                        .replace("hundred-gigabit-ethernet ", "hundred-gigabit-ethernet-") \
+                                        .replace("gigabit-ethernet ", "gigabit-ethernet-") \
+                                        .replace("lag ", "lag-")
+            data['interface_untagged_vlans'][iface_formatted] = int(vlan_id)
 
-                ifaces = re.findall(r'interface\s+([\w\-\/]+)', content)
-                for iface_item in ifaces:
-                    add_iface_vlan(iface_item, vid)
+        # 4. VLANs nativas e tagged do bloco dot1q
+        vlan_block = re.search(r'dot1q\n(.*?)(?=\n!\n|\n[a-z]|\Z)', config_text, re.DOTALL)
+        if vlan_block:
+            vlan_sub_blocks = re.findall(r'vlan\s+([\d\,\-]+)(.*?)(?=\n\s*vlan\s+[\d\,\-]+|\Z)', vlan_block.group(1), re.DOTALL)
+            for vid_str, content in vlan_sub_blocks:
+                vids = parse_vlan_range(vid_str)
+                name_match = re.search(r'name\s+(.+)', content)
+                vname = name_match.group(1).strip() if name_match else None
+                for vid in vids:
+                    if vname:
+                        data['vlans'][vid] = vname
+                    elif vid not in data['vlans']:
+                        data['vlans'][vid] = f"VLAN-{vid}"
+
+                iface_blocks = re.findall(r'interface\s+([\w\-\/]+)(.*?)(?=\n\s*interface\s+[\w\-\/]+|\n\s*!\s*|\Z)', content, re.DOTALL)
+                for iface_item, iface_sub in iface_blocks:
+                    is_untagged = 'untagged' in iface_sub.lower()
+                    for vid in vids:
+                        if is_untagged:
+                            add_iface_untagged_vlan(iface_item, vid)
+                        else:
+                            add_iface_vlan(iface_item, vid)
+
+        # 4.1. Bloco switchport (native-vlan)
+        switchport_block = re.search(r'switchport\n(.*?)(?=\n!\n|\n[a-z]|\Z)', config_text, re.DOTALL)
+        if switchport_block:
+            iface_blocks = re.findall(r'interface\s+([\w\-\/]+)(.*?)(?=\n\s*interface\s+[\w\-\/]+|\n\s*!\s*|\Z)', switchport_block.group(1), re.DOTALL)
+            for iface_item, iface_sub in iface_blocks:
+                native_match = re.search(r'native-vlan(?:\s*vlan-id|\n\s*vlan-id)\s+(\d+)', iface_sub)
+                if native_match:
+                    native_vid = int(native_match.group(1))
+                    add_iface_untagged_vlan(iface_item, native_vid)
+
+        # Remove VLANs untagged da lista de tagged VLANs por interface
+        for iface_key, untagged_vid in data['interface_untagged_vlans'].items():
+            if iface_key in data['interface_vlans']:
+                data['interface_vlans'][iface_key].discard(untagged_vid)
 
         vlan_roles_map = {}
 
@@ -415,20 +494,6 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                 'interface': iface_name,
                 'vlan_id': vlan_vid
             })
-
-        def parse_vlan_range(vlan_str):
-            vlans = []
-            for part in vlan_str.split(','):
-                part = part.strip()
-                if '-' in part:
-                    try:
-                        start, end = part.split('-')
-                        vlans.extend(range(int(start), int(end) + 1))
-                    except ValueError:
-                        pass
-                elif part.isdigit():
-                    vlans.append(int(part))
-            return vlans
 
         # 6. VPLS Parsing
         vpls_blocks = re.findall(r'vpls-group\s+([\w\-]+)(.*?)(?=\n vpls-group|\n!\n|\n\w)', config_text, re.DOTALL)

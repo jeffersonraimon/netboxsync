@@ -105,6 +105,45 @@ def test_legacy_parse_dmos_data_compatibility():
     assert 10 in parsed['vlans']
 
 
+def test_dmos_untagged_and_switchport_parsing():
+    dmos_cfg = """
+hostname OLT-TEST
+
+dot1q
+ vlan 4000
+  name MGMT-LOCAL
+  interface gigabit-ethernet-1/1/1
+    untagged
+  !
+  interface ten-gigabit-ethernet-1/1/1
+  !
+ !
+!
+switchport
+ interface gigabit-ethernet-1/1/1
+  native-vlan
+   vlan-id 4000
+  !
+ !
+!
+"""
+    driver = get_driver('dmos')
+    parsed = driver.parse_data(dmos_cfg)
+
+    assert parsed['hostname'] == 'OLT-CA-TEST'
+    assert 4000 in parsed['vlans']
+    assert parsed['vlans'][4000] == 'MGMT-LOCAL-VIA-OSPF'
+
+    # gigabit-ethernet-1/1/1 tem a VLAN 4000 como UNTAGGED e NAO como tagged
+    assert parsed['interface_untagged_vlans'].get('gigabit-ethernet-1/1/1') == 4000
+    assert 4000 not in parsed['interface_vlans'].get('gigabit-ethernet-1/1/1', set())
+
+    # ten-gigabit-ethernet-1/1/1 tem a VLAN 4000 como TAGGED
+    assert 4000 in parsed['interface_vlans'].get('ten-gigabit-ethernet-1/1/1', set())
+    assert parsed['interface_untagged_vlans'].get('ten-gigabit-ethernet-1/1/1') is None
+
+
+
 SAMPLE_ROUTEROS_TERSE = """
 # /system identity print terse
  0 name="MK-ROUTER-01"
