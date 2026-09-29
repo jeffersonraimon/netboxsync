@@ -28,6 +28,20 @@ def safe_get(endpoint, **kwargs):
         return None
 
 
+def lag_parent_id(iface):
+    """
+    Extrai o ID da LAG pai de uma interface, aceitando Record do pynetbox, dict ou int.
+    """
+    lag = getattr(iface, 'lag', None)
+    if lag is None:
+        return None
+    if isinstance(lag, dict):
+        return lag.get('id')
+    if isinstance(lag, int):
+        return lag
+    return getattr(lag, 'id', None)
+
+
 def find_netbox_device(nb, dev_name):
     """
     Busca um equipamento no NetBox por nome exato, slug, nome insensível a maiúsculas/minúsculas,
@@ -334,14 +348,17 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
             role_obj = nb.ipam.roles.create(name=role_name, slug=role_slug)
         vlan_roles_cache[role_name] = getattr(role_obj, 'id', getattr(role_obj, 'pk', None))
 
-    # Pre-carrega todas as interfaces ja existentes no dispositivo do NetBox para uso por outros módulos
+    # Pre-carrega todas as interfaces ja existentes no dispositivo do NetBox para uso por outros módulos.
+    # Nomes EXATOS tem prioridade: variacoes com espaco/hifen entram apenas como fallback. Sem isso, um
+    # cadastro em hifen (ex: 'ten-gigabit-ethernet-1/1/1' criado por engano em execucoes antigas) sobrescreve
+    # a chave da interface oficial com espaco ('ten-gigabit-ethernet 1/1/1') e o sync deixa de cria-la/atualiza-la.
     existing_ifaces_map = {}
-    for existing_if in list(nb.dcim.interfaces.filter(device_id=device_id)):
+    device_ifaces = list(nb.dcim.interfaces.filter(device_id=device_id))
+    for existing_if in device_ifaces:
         existing_ifaces_map[existing_if.name] = existing_if
-        norm_key = existing_if.name.replace(" ", "-")
-        existing_ifaces_map[norm_key] = existing_if
-        alt_key = existing_if.name.replace("-", " ")
-        existing_ifaces_map[alt_key] = existing_if
+    for existing_if in device_ifaces:
+        for alt_key in (existing_if.name.replace(" ", "-"), existing_if.name.replace("-", " ")):
+            existing_ifaces_map.setdefault(alt_key, existing_if)
 
     # Sincronizar VLANs e atribuir as Roles
     nb_vlans = {}
@@ -432,6 +449,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         mtu=iface.get('mtu')
                     )
                     existing_ifaces_map[if_name] = nb_iface
+                    # Registra as variacoes espaco/hifen (fallback) para que referencias de LAG/VLAN
+                    # encontrem a interface recem-criada ainda nesta mesma execucao
+                    existing_ifaces_map.setdefault(if_name.replace(" ", "-"), nb_iface)
+                    existing_ifaces_map.setdefault(if_name.replace("-", " "), nb_iface)
                 else:
                     need_save = False
                     cur_type = getattr(nb_iface.type, 'value', str(nb_iface.type or ''))
@@ -630,19 +651,64 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             print(f"[!] Aviso ao associar bridge em {nb_member.name}: {b_err}")
 
         # Vincular interfaces membros às suas respectivas LAGs
+        lag_expected_members = {}  # lag_id -> {interface_ids que DEVEM estar nesta LAG}
         for lag in data['lags']:
             lag_name = lag['name']
             nb_lag = existing_ifaces_map.get(lag_name) or existing_ifaces_map.get(lag_name.replace(" ", "-")) or existing_ifaces_map.get(lag_name.replace("-", " "))
-            if nb_lag and lag.get('members'):
-                lag_id_val = getattr(nb_lag, 'id', getattr(nb_lag, 'pk', None))
-                for member_name in lag['members']:
-                    nb_member = existing_ifaces_map.get(member_name) or existing_ifaces_map.get(member_name.replace(" ", "-")) or existing_ifaces_map.get(member_name.replace("-", " "))
-                    if nb_member:
-                        current_lag_id = getattr(nb_member.lag, 'id', nb_member.lag if isinstance(nb_member.lag, int) else None)
-                        if current_lag_id != lag_id_val:
-                            print(f"[➔] Associando membro physical {nb_member.name} -> LAG {nb_lag.name}")
-                            nb_member.lag = lag_id_val
-                            nb_member.save()
+            if not nb_lag or not lag.get('members'):
+                continue
+
+            lag_id_val = getattr(nb_lag, 'id', getattr(nb_lag, 'pk', None))
+            if lag_id_val is None:
+                continue
+            expected_ids = set()
+
+            for member_name in lag['members']:
+                nb_member = existing_ifaces_map.get(member_name) or existing_ifaces_map.get(member_name.replace(" ", "-")) or existing_ifaces_map.get(member_name.replace("-", " "))
+                if not nb_member:
+                    continue
+
+                # O NetBox recusa (HTTP 400) interfaces virtuais/loopback/LAG como membros de uma LAG
+                member_type = getattr(nb_member.type, 'value', str(nb_member.type or '')).lower()
+                member_lname = str(getattr(nb_member, 'name', '') or '').lower()
+                if member_type in ('virtual', 'lag') or member_lname.startswith(('loopback', 'mgmt', 'vlan')) or 'loopback' in member_lname:
+                    print(f"[i] Ignorando '{nb_member.name}' como membro da LAG {nb_lag.name}: tipo '{member_type}' nao suporta LAG parent.")
+                    continue
+
+                member_id = getattr(nb_member, 'id', getattr(nb_member, 'pk', None))
+                if member_id is not None:
+                    expected_ids.add(int(member_id))
+
+                current_lag_id = lag_parent_id(nb_member)
+                if current_lag_id != lag_id_val:
+                    print(f"[➔] Associando membro physical {nb_member.name} -> LAG {nb_lag.name}")
+                    nb_member.lag = lag_id_val
+                    try:
+                        nb_member.save()
+                    except Exception as lag_err:
+                        print(f"[!] Aviso ao associar {nb_member.name} a LAG {nb_lag.name}: {lag_err}")
+
+            lag_expected_members[int(lag_id_val)] = expected_ids
+
+        # Self-healing: remove das LAGs do NetBox os membros que nao constam mais na config do equipamento.
+        # Sem isso, membros de execucoes antigas (ou removidos do equipamento) ficariam presos para sempre,
+        # pois o sync apenas adiciona membros. So atua em LAGs que tiveram membros identificados no parse.
+        if lag_expected_members:
+            for nb_iface_all in nb.dcim.interfaces.filter(device_id=device_id):
+                cur_lag_id = lag_parent_id(nb_iface_all)
+                if cur_lag_id is None or not str(cur_lag_id).isdigit():
+                    continue
+                expected = lag_expected_members.get(int(cur_lag_id))
+                if expected is None:
+                    continue
+                if_id = getattr(nb_iface_all, 'id', getattr(nb_iface_all, 'pk', None))
+                if if_id is not None and int(if_id) not in expected:
+                    print(f"[➔] Removendo membro obsoleto '{nb_iface_all.name}' da LAG {cur_lag_id} (nao consta na config do equipamento)")
+                    nb_iface_all.lag = None
+                    try:
+                        nb_iface_all.save()
+                    except Exception as stale_err:
+                        print(f"[!] Aviso ao remover '{nb_iface_all.name}' da LAG {cur_lag_id}: {stale_err}")
 
     # 5.1. Sincronizar Inventory Items (Transceivers)
     if 'transceivers' in sync_modules and data.get('inventory_items'):
