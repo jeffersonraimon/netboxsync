@@ -12,6 +12,12 @@ __pycache__/
 dmos_running_sample.txt
 hosts.txt
 
+# Amostras reais de configuracao de equipamentos (podem conter credenciais, chaves e senhas)
+config_backup.txt
+config_*.txt
+samples/
+up-internet/
+
 # Configuracoes locais com dados sensiveis (se houver)
 .env
 local_config.py

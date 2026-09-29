@@ -460,92 +460,188 @@ class DatacomDmOSDriver(BaseDeviceDriver):
 
         vlan_roles_map = {}
 
-        # 5. VPWS Parsing
-        vpws_blocks = re.findall(r'vpws-group\s+([\w\-]+)(.*?)(?=\n vpws-group|\n vpls-group|\n!\n|\n\w)', config_text, re.DOTALL)
-        for vpws_name, content in vpws_blocks:
-            pw_id = re.search(r'pw-id\s+(\d+)', content)
-            nbr = re.search(r'neighbor\s+([\d\.]+)', content)
-            iface = re.search(r'access-interface\s+([\w\-\/]+)', content)
-            dot1q = re.search(r'dot1q\s+(\d+)', content)
+        # ------------------------------------------------------------------
+        # 5/6. VPWS e VPLS (bloco "mpls l2vpn")
+        # Estrutura DmOS:
+        #   mpls l2vpn
+        #    vpws-group <GRUPO>
+        #     vpn <NOME|ID>            <- CADA "vpn" e um pseudowire independente
+        #      description <TEXTO>
+        #      neighbor <IP>
+        #       pw-id <ID>
+        #      access-interface <IFACE>
+        #       dot1q <VID>
+        #    vpls-group <GRUPO>
+        #     vpn <NOME|ID>
+        #      vfi
+        #       pw-type vlan <S-VLAN>
+        #       neighbor <IP>
+        #        pw-id <ID>
+        #      bridge-domain
+        #       qinq
+        #       dot1q <S-VLAN>
+        #       access-interface <IFACE>
+        #        encapsulation
+        #         dot1q <C-VLANs>
+        # ------------------------------------------------------------------
+        l2vpn_section = config_text
+        l2vpn_match = re.search(r'^mpls l2vpn\s*$(.*?)(?=^!\s*$|\Z)', config_text, re.DOTALL | re.MULTILINE)
+        if l2vpn_match:
+            l2vpn_section = l2vpn_match.group(1)
 
-            pw_id_val = int(pw_id.group(1)) if pw_id else None
-            dot1q_val = int(dot1q.group(1)) if dot1q else None
-            iface_name = iface.group(1) if iface else None
+        def block_description(block_text):
+            desc_match = re.search(r'^[ \t]*description\s+(.+)$', block_text, re.MULTILINE)
+            return desc_match.group(1).strip().strip('"') if desc_match else ''
 
-            if dot1q_val and dot1q_val <= 4094:
-                vlan_vid = dot1q_val
-            elif pw_id_val and pw_id_val <= 4094:
-                vlan_vid = pw_id_val
+        def vpn_display_name(vpn_token, group_name, block_text, group_desc, group_multi):
+            """Nomeia a L2VPN: nome do 'vpn', senao a description, senao GRUPO-ID."""
+            token = str(vpn_token).strip() if vpn_token else ''
+            desc = block_description(block_text) or group_desc
+            if token and not token.isdigit():
+                return token
+            if desc:
+                return desc
+            if token:
+                return f"{group_name}-{token}" if group_multi else group_name
+            return group_name
+
+        l2vpn_groups = list(re.finditer(
+            r'^[ \t]*(vpws|vpls)-group\s+([\w\-\.]+)\s*$(.*?)(?=^[ \t]*(?:vpws|vpls)-group\s+|\Z)',
+            l2vpn_section, re.DOTALL | re.MULTILINE))
+
+        for group_match in l2vpn_groups:
+            group_kind = group_match.group(1).lower()
+            group_name = group_match.group(2).strip()
+            group_body = group_match.group(3)
+
+            # Cada 'vpn' dentro do grupo e um servico (pseudowire) distinto
+            vpn_matches = list(re.finditer(
+                r'^([ \t]+)vpn\s+([^\s\n]+)\s*$(.*?)(?=^\1vpn\s+[^\s\n]+\s*$|\Z)',
+                group_body, re.DOTALL | re.MULTILINE))
+
+            first_vpn_pos = vpn_matches[0].start() if vpn_matches else len(group_body)
+            group_desc = block_description(group_body[:first_vpn_pos])
+
+            # Config legado sem sub-blocos 'vpn': trata o grupo inteiro como um unico servico.
+            # Grupos vazios (ex: 'vpws-group X' seguido apenas de '!') sao ignorados.
+            if vpn_matches:
+                vpn_blocks = [(m.group(2).strip(), m.group(3)) for m in vpn_matches]
             else:
-                vlan_vid = None
+                if not re.search(r'^[ \t]*(?:neighbor|pw-id|access-interface|pw-type)\b', group_body, re.MULTILINE):
+                    continue
+                vpn_blocks = [(None, group_body)]
+            group_multi = len(vpn_blocks) > 1
 
-            if iface_name and vlan_vid:
-                add_iface_vlan(iface_name, vlan_vid)
-                if vlan_vid not in data['vlans']:
-                    data['vlans'][vlan_vid] = f"VLAN-{vlan_vid}-{vpws_name}"
+            for vpn_token, block in vpn_blocks:
+                entry_name = vpn_display_name(vpn_token, group_name, block, group_desc, group_multi)
+                entry_desc = block_description(block) or group_desc
 
-            if vlan_vid:
-                vlan_roles_map[vlan_vid] = "VPWS-TUNEIS"
+                # 5. VPWS
+                if group_kind == 'vpws':
+                    pw_id = re.search(r'^[ \t]*pw-id\s+(\d+)', block, re.MULTILINE)
+                    nbr = re.search(r'^[ \t]*neighbor\s+([\d\.]+)', block, re.MULTILINE)
+                    ifaces = list(dict.fromkeys(
+                        re.findall(r'^[ \t]*access-interface\s+([\w\-\.\/]+)', block, re.MULTILINE)))
+                    dot1q = re.search(r'^[ \t]*dot1q\s+(\d+)', block, re.MULTILINE)
 
-            data['vpws'].append({
-                'name': vpws_name,
-                'pw_id': pw_id.group(1) if pw_id else '',
-                'neighbor': nbr.group(1) if nbr else '',
-                'interface': iface_name,
-                'vlan_id': vlan_vid
-            })
+                    pw_id_val = int(pw_id.group(1)) if pw_id else None
+                    dot1q_val = int(dot1q.group(1)) if dot1q else None
+                    iface_name = ifaces[0] if ifaces else None
 
-        # 6. VPLS Parsing
-        vpls_blocks = re.findall(r'vpls-group\s+([\w\-]+)(.*?)(?=\n vpls-group|\n!\n|\n\w)', config_text, re.DOTALL)
-        for vpls_name, content in vpls_blocks:
-            pw_type_vlan = re.search(r'pw-type vlan\s+(\d+)', content)
-            dot1q = re.search(r'dot1q\s+(\d+)', content)
-            vlan_vid = int(pw_type_vlan.group(1)) if pw_type_vlan else (int(dot1q.group(1)) if dot1q else None)
+                    if dot1q_val and dot1q_val <= 4094:
+                        vlan_vid = dot1q_val
+                    elif pw_id_val and pw_id_val <= 4094:
+                        vlan_vid = pw_id_val
+                    else:
+                        vlan_vid = None
 
-            is_qinq = bool(re.search(r'qinq', content, re.IGNORECASE))
-            customer_vlans = []
+                    if iface_name and vlan_vid:
+                        add_iface_vlan(iface_name, vlan_vid)
+                        if vlan_vid not in data['vlans']:
+                            data['vlans'][vlan_vid] = f"VLAN-{vlan_vid}-{entry_name}"
 
-            encap_match = re.search(r'encapsulation\s+\n?\s*dot1q\s+([\d\-\,\s]+)', content)
-            if encap_match:
-                customer_vlans = parse_vlan_range(encap_match.group(1))
+                    if vlan_vid:
+                        vlan_roles_map[vlan_vid] = "VPWS-TUNEIS"
 
-            access_ifaces = re.findall(r'access-interface\s+([\w\-\/]+)', content)
-            for iface in access_ifaces:
+                    data['vpws'].append({
+                        'name': entry_name,
+                        'group': group_name,
+                        'vpn': vpn_token or '',
+                        'pw_id': pw_id.group(1) if pw_id else '',
+                        'neighbor': nbr.group(1) if nbr else '',
+                        'interface': iface_name,
+                        'interfaces': ifaces,
+                        'vlan_id': vlan_vid,
+                        'description': entry_desc
+                    })
+                    continue
+
+                # 6. VPLS
+                pw_type_vlan = re.search(r'^[ \t]*pw-type\s+vlan\s+(\d+)', block, re.MULTILINE)
+                bd_dot1q = re.search(r'^[ \t]*dot1q\s+(\d+)', block, re.MULTILINE)
+                vlan_vid = int(pw_type_vlan.group(1)) if pw_type_vlan else (int(bd_dot1q.group(1)) if bd_dot1q else None)
+
+                is_qinq = bool(re.search(r'\bqinq\b', block, re.IGNORECASE))
+                customer_vlans = []
+
+                encap_match = re.search(r'^[ \t]*encapsulation\s*\n?[ \t]*dot1q\s+([\d\-\,\s]+)', block, re.MULTILINE)
+                if encap_match:
+                    customer_vlans = parse_vlan_range(encap_match.group(1))
+
+                access_ifaces = list(dict.fromkeys(
+                    re.findall(r'^[ \t]*access-interface\s+([\w\-\.\/]+)', block, re.MULTILINE)))
+                for iface in access_ifaces:
+                    if vlan_vid:
+                        add_iface_vlan(iface, vlan_vid)
+
                 if vlan_vid:
-                    add_iface_vlan(iface, vlan_vid)
+                    if vlan_vid not in data['vlans']:
+                        data['vlans'][vlan_vid] = f"VLAN-{vlan_vid}-{entry_name}"
+                    vlan_roles_map[vlan_vid] = "VPLS-TUNEIS"
 
-            if vlan_vid:
-                if vlan_vid not in data['vlans']:
-                    data['vlans'][vlan_vid] = f"VLAN-{vlan_vid}-{vpls_name}"
-                vlan_roles_map[vlan_vid] = "VPLS-TUNEIS"
+                for cvid in customer_vlans:
+                    if cvid not in data['vlans']:
+                        data['vlans'][cvid] = f"VLAN-{cvid}-Customer-{entry_name}"
+                    vlan_roles_map[cvid] = "VPLS-TUNEIS"
 
-            for cvid in customer_vlans:
-                if cvid not in data['vlans']:
-                    data['vlans'][cvid] = f"VLAN-{cvid}-Customer-{vpls_name}"
-                vlan_roles_map[cvid] = "VPLS-TUNEIS"
+                neighbors = re.findall(r'^[ \t]*neighbor\s+([\d\.]+).*?^[ \t]*pw-id\s+(\d+)', block, re.DOTALL | re.MULTILINE)
+                data['vpls'].append({
+                    'name': entry_name,
+                    'group': group_name,
+                    'vpn': vpn_token or '',
+                    'vlan_id': vlan_vid,
+                    'is_qinq': is_qinq,
+                    'customer_vlans': customer_vlans,
+                    'neighbors': neighbors,
+                    'interfaces': access_ifaces,
+                    'description': entry_desc
+                })
 
-            neighbors = re.findall(r'neighbor\s+([\d\.]+).*?pw-id\s+(\d+)', content, re.DOTALL)
-            data['vpls'].append({
-                'name': vpls_name,
-                'vlan_id': vlan_vid,
-                'is_qinq': is_qinq,
-                'customer_vlans': customer_vlans,
-                'neighbors': neighbors,
-                'interfaces': access_ifaces
-            })
+        # 7. LAGs (bloco "link-aggregation")
+        lag_section = config_text
+        lag_section_match = re.search(r'^link-aggregation\s*$(.*?)(?=^!\s*$|\Z)', config_text, re.DOTALL | re.MULTILINE)
+        if lag_section_match:
+            lag_section = lag_section_match.group(1)
 
-        # 7. LAGs
-        lag_matches = list(re.finditer(r'interface lag (\d+)', config_text, re.IGNORECASE))
+        lag_matches = list(re.finditer(r'^[ \t]*interface lag[ \-]?(\d+)\s*$', lag_section, re.MULTILINE | re.IGNORECASE))
         for i, match in enumerate(lag_matches):
             lag_id = match.group(1)
             lag_name = f'lag-{lag_id}'
             start_pos = match.end()
-            end_pos = lag_matches[i+1].start() if i + 1 < len(lag_matches) else len(config_text)
-            content = config_text[start_pos:end_pos]
+            end_pos = lag_matches[i+1].start() if i + 1 < len(lag_matches) else len(lag_section)
+            content = lag_section[start_pos:end_pos]
 
-            desc_match = re.search(r'description\s+(.+)', content)
-            members = re.findall(r'interface\s+((?:[a-z0-9\-]+-ethernet|mgmt|loopback)[\s\-][\d\/]+)', content)
-            members_clean = [m.strip() for m in members]
+            desc_match = re.search(r'^[ \t]*description\s+(.+)$', content, re.MULTILINE)
+
+            # Somente portas fisicas Ethernet entram como membros da LAG. O bloco precisa
+            # ser limitado ao link-aggregation para nao capturar 'remote-devices', 'loopback', etc.
+            members = re.findall(r'^[ \t]*interface\s+([a-z0-9\-]+-ethernet[ \t\-][\d\/]+)\s*$', content, re.MULTILINE | re.IGNORECASE)
+            members_clean = []
+            for member in members:
+                member_norm = re.sub(r'[ \t]+', '-', member.strip())
+                if member_norm in members_clean:
+                    continue
+                members_clean.append(member_norm)
 
             lag_entry = next((l for l in data['lags'] if l['name'] == lag_name), None)
             if not lag_entry:
@@ -561,7 +657,8 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                     lag_entry['members'] = list(set(lag_entry['members'] + members_clean))
 
         # 8. Interfaces Físicas e Loopbacks
-        phys_blocks = re.findall(r'interface\s+((?:[a-z0-9\-]+-ethernet|mgmt|loopback)[\s\-][\d\/]+)(.*?)(?=\n!|\ninterface|\Z)', config_text, re.DOTALL)
+        # Ancora no inicio da linha: ignora blocos indentados como 'remote-devices' (config de portas remotas)
+        phys_blocks = re.findall(r'^interface\s+((?:[a-z0-9\-]+-ethernet|mgmt|loopback)[\s\-][\d\/]+)(.*?)(?=\n!|\ninterface|\Z)', config_text, re.DOTALL | re.MULTILINE)
         for iface_raw, content in phys_blocks:
             name = iface_raw.strip()
             desc = re.search(r'description\s+(.+)', content)
@@ -586,7 +683,8 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                 data['ips'].append({'interface': name, 'address': ipv6.group(1)})
 
         # 9. Interfaces L3
-        l3_blocks = re.findall(r'interface l3[\s\-]+([\w\-]+)(.*?)(?=\n!|\ninterface|\Z)', config_text, re.DOTALL)
+        # Ancora no inicio da linha: evita casar 'interface l3-vlanX' indentada dentro de 'mpls ldp'/'router ospf'
+        l3_blocks = re.findall(r'^interface l3[\s\-]+([\w\-]+)(.*?)(?=\n!|\ninterface|\Z)', config_text, re.DOTALL | re.MULTILINE)
         for l3_name, content in l3_blocks:
             ipv4 = re.search(r'ipv4 address\s+([\d\.\/]+)', content)
             ipv6 = re.search(r'ipv6 address\s+([\w:\/]+)', content)
