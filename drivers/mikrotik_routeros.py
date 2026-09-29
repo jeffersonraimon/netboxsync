@@ -50,8 +50,10 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
             session.connect()
             for cmd in commands:
                 print(f"  [➔] Executando comando: {cmd}")
-                # Envia o comando com timeout otimizado de 10s por comando
-                output = session.send_command(cmd, timeout=10)
+                # Tenta primeiro via exec_command (SSH exec direto sem PTY)
+                output = session.exec_command(cmd, timeout=10)
+                if not output:
+                    output = session.send_command(cmd, timeout=10)
                 outputs[cmd] = output
         finally:
             session.close()

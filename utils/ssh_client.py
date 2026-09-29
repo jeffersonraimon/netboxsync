@@ -51,7 +51,7 @@ class SSHClientSession:
             timeout=self.timeout
         )
         
-        self.channel = self.client.invoke_shell(term='vt100', width=500, height=1000)
+        self.channel = self.client.invoke_shell(term='dumb', width=500, height=1000)
         self.channel.settimeout(1.0)
         
         # Aguarda prompt inicial
@@ -63,10 +63,11 @@ class SSHClientSession:
                 prompt_buf += chunk
                 self._log(chunk)
                 if re.search(r'[#>]', prompt_buf):
+                    time.sleep(0.3)
                     break
             time.sleep(0.2)
 
-    def send_command(self, command, expect_regex=r'[\r\n][\w\.\-]+[#>]\s*$', timeout=60):
+    def send_command(self, command, expect_regex=r'[\r\n\x1b][<\[]?[^#>\r\n]+[>#]\s*$', timeout=60):
         """Envia um comando para o shell interativo e aguarda a resposta até o prompt."""
         if not command.endswith('\n'):
             command += '\n'
@@ -79,19 +80,40 @@ class SSHClientSession:
                 break
 
         self.channel.send(command)
+        time.sleep(0.2)
         buf = ""
         cmd_start = time.time()
+        cmd_clean = command.strip()
         while time.time() - cmd_start < timeout:
             if self.channel.recv_ready():
                 chunk = self.channel.recv(16384).decode('utf-8', errors='ignore')
                 buf += chunk
                 self._log(chunk)
                 if expect_regex and re.search(expect_regex, buf):
-                    break
+                    lines = [l.strip() for l in buf.splitlines() if l.strip()]
+                    if len(lines) > 1 or (lines and cmd_clean not in lines[-1]):
+                        break
             else:
                 time.sleep(0.2)
 
         return buf
+
+    def exec_command(self, command, timeout=10):
+        """
+        Executa um comando de forma direta (batch / non-interactive SSH exec).
+        Retorna a saída do comando como string.
+        """
+        if not self.client:
+            return ""
+        try:
+            stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+            output = stdout.read().decode('utf-8', errors='ignore')
+            err = stderr.read().decode('utf-8', errors='ignore')
+            result = output or err
+            self._log(f"\n--- [EXEC COMMAND: {command}] ---\n{result}\n")
+            return result
+        except Exception as e:
+            return ""
 
     def close(self):
         """Encerra a sessão SSH."""
