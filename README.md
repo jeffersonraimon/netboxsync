@@ -115,7 +115,32 @@ netboxsync/
 
 ---
 
-> **Observação**: É recomendando que o **Device Type** (`device-type`) já esteja previamente cadastrado no NetBox antes de realizar a sincronização.
+> [!NOTE]
+> **Observação**: É recomendativo que o **Device Type** (`device-type`) já esteja previamente cadastrado no NetBox antes de realizar a sincronização.
+
+## 📖 Parâmetros e Opções da CLI (`--help`)
+
+| Parâmetro / Flag | Abreviação | Descrição | Valor Padrão / Env |
+| :--- | :---: | :--- | :--- |
+| `--help` | `-h` | Exibe a mensagem de ajuda com todas as opções. | - |
+| `--driver` | `-d-driver` | Nome/slug do driver de fabricante/SO (`dmos`, `routeros`, etc.). | `dmos` |
+| `--file` | `-f` | Caminho para arquivo com a saída de configurações locais. | - |
+| `--host` | `-H` | Endereço IP ou FQDN do equipamento para conectar via SSH. | - |
+| `--hosts-file` | `-F` | Arquivo texto contendo lista de IPs/Hosts (um por linha). | - |
+| `--username` | `-u` | Usuário SSH do equipamento. | `.env` (`SSH_USER`) |
+| `--password` | `-p` | Senha SSH do equipamento. | `.env` (`SSH_PASS`) |
+| `--port` | `-P` | Porta SSH remota. | `22` / `SSH_PORT` |
+| `--debug` | `-d` | Ativa o modo de depuração com logs SSH/API detalhados. | `False` |
+| `--url` | - | URL do servidor NetBox. | `.env` (`NETBOX_URL`) |
+| `--token` | - | Token de autenticação da API do NetBox. | `.env` (`NETBOX_TOKEN`) |
+| `--site` | `-s` | Nome/Slug do Site (POP) no NetBox. | Coleta automática |
+| `--role` | `-r` | Device Role no NetBox (ex: `SWITCH`, `Router`). | `SWITCH` |
+| `--device-type` | `-m`, `--model` | Modelo / Device Type no NetBox. | Coleta automática |
+| `--insecure` | `-k` | Ignora a verificação de certificado SSL (auto-assinado). | `False` |
+| `--dry-run` | - | Executa a simulação sem realizar alterações no NetBox. | `False` |
+| `--sync-modules` | `-m-sync` | Módulos a sincronizar (`vlans`, `interfaces`, `ips`, `vrrp`, `l2vpn`, `cables`, `transceivers`, `vpn_tunnels`) ou `all`. | `all` |
+
+---
 
 ## 💻 Exemplos de Uso
 
