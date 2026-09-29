@@ -1,0 +1,4 @@
+pynetbox>=7.0.0
+netmiko>=4.0.0
+python-dotenv>=1.0.0
+

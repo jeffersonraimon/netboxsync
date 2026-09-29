@@ -1,0 +1,18 @@
+# Ambientes Virtuais Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Arquivos temporarios, amostras e logs
+*.log
+*.tmp
+.DS_Store
+dmos_running_sample.txt
+hosts.txt
+
+# Configuracoes locais com dados sensiveis (se houver)
+.env
+local_config.py
+
