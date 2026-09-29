@@ -807,8 +807,14 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
             for vrrp in data['vrrp_groups']:
                 protocol_str = 'vrrp2' if 'v2' in vrrp.get('version', '').lower() else 'vrrp3'
                 vr_id = vrrp['vr_id']
-                vip_addr = vrrp['virtual_ip']
-                
+                vip_addr = vrrp.get('virtual_ip')
+                vrrp_name = vrrp.get('name') or vrrp.get('vrrp_interface')
+                parent_if_name = vrrp.get('interface')
+
+                # Se não houver IP Virtual configurado para o grupo VRRP, ignora a atribuição de IP
+                if not vip_addr:
+                    continue
+
                 # Garante que o IP virtual existe na VRF
                 ip_vrrp_obj = safe_get(nb.ipam.ip_addresses, address=vip_addr, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=vip_addr)
                 if not ip_vrrp_obj:
@@ -821,20 +827,39 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             address=full_vip,
                             vrf=vrf_id,
                             status='active',
-                            description=f"VRRP Virtual IP Group {vr_id}"
+                            description=f"VRRP Virtual IP Group {vr_id} ({vrrp_name or ''})"
                         )
                 
                 vip_id = getattr(ip_vrrp_obj, 'id', getattr(ip_vrrp_obj, 'pk', None))
                 
                 # Busca ou cria o FHRP Group
                 fhrp_groups = list(fhrp_endpoint.filter(group_id=vr_id, protocol=protocol_str))
-                fhrp_group = fhrp_groups[0] if fhrp_groups else None
+                fhrp_group = next((g for g in fhrp_groups if getattr(g, 'name', None) == vrrp_name), fhrp_groups[0] if fhrp_groups else None)
                 if not fhrp_group:
-                    print(f"[+] Criando FHRP Group VRRP (Protocol: {protocol_str}, Group ID: {vr_id})...")
-                    fhrp_group = fhrp_endpoint.create(
-                        protocol=protocol_str,
-                        group_id=vr_id
-                    )
+                    print(f"[+] Criando FHRP Group VRRP (Protocol: {protocol_str}, Group ID: {vr_id}, Name: {vrrp_name or 'N/A'})...")
+                    create_data = {
+                        'protocol': protocol_str,
+                        'group_id': vr_id
+                    }
+                    if vrrp_name:
+                        create_data['name'] = vrrp_name
+                        create_data['description'] = f"VRRP {vrrp_name}"
+                    fhrp_group = fhrp_endpoint.create(**create_data)
+                else:
+                    need_fg_save = False
+                    if vrrp_name:
+                        if getattr(fhrp_group, 'name', None) != vrrp_name:
+                            print(f"[➔] Atualizando Nome do FHRP Group {vr_id} -> '{vrrp_name}'...")
+                            fhrp_group.name = vrrp_name
+                            need_fg_save = True
+                        if not getattr(fhrp_group, 'description', None):
+                            fhrp_group.description = f"VRRP {vrrp_name}"
+                            need_fg_save = True
+                    if need_fg_save:
+                        try:
+                            fhrp_group.save()
+                        except Exception as fg_err:
+                            print(f"[!] Aviso ao atualizar nome no FHRP Group {vr_id}: {fg_err}")
 
                 fg_id = getattr(fhrp_group, 'id', getattr(fhrp_group, 'pk', None))
 
@@ -846,9 +871,14 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         ip_vrrp_obj.assigned_object_id = fg_id
                         ip_vrrp_obj.save()
 
-                # Atribui a interface física/L3 ao FHRP Group
+                # Atribui a interface física/L3/VRRP ao FHRP Group
                 if fhrp_ass_endpoint and fhrp_group:
-                    iface_target = existing_ifaces_map.get(vrrp['interface']) or existing_ifaces_map.get(vrrp['interface'].replace(" ", "-")) or existing_ifaces_map.get(vrrp['interface'].replace("-", " "))
+                    iface_target = None
+                    if vrrp_name:
+                        iface_target = existing_ifaces_map.get(vrrp_name) or existing_ifaces_map.get(vrrp_name.replace(" ", "-")) or existing_ifaces_map.get(vrrp_name.replace("-", " "))
+                    if not iface_target and parent_if_name:
+                        iface_target = existing_ifaces_map.get(parent_if_name) or existing_ifaces_map.get(parent_if_name.replace(" ", "-")) or existing_ifaces_map.get(parent_if_name.replace("-", " "))
+
                     if iface_target:
                         if_id = getattr(iface_target, 'id', getattr(iface_target, 'pk', None))
                         fg_id = getattr(fhrp_group, 'id', getattr(fhrp_group, 'pk', None))

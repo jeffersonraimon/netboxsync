@@ -438,16 +438,31 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
                 vname = fields.get('name')
                 prio = fields.get('priority', '100')
                 if vname and not any(l['name'] == vname for l in data['interfaces_l3']):
-                    data['interfaces_l3'].append({'name': vname, 'vlan': None, 'parent': iface, 'type': 'virtual'})
-                if vrid and iface:
+                    data['interfaces_l3'].append({
+                        'name': vname,
+                        'description': f"VRRP {vname}" + (f" (VRID: {vrid})" if vrid else ""),
+                        'vlan': None,
+                        'parent': iface,
+                        'type': 'virtual'
+                    })
+                if vrid and (iface or vname):
                     vrid_match = re.search(r'\d+', str(vrid))
                     prio_match = re.search(r'\d+', str(prio))
                     if vrid_match:
+                        # Busca o IP Virtual atribuído à interface VRRP em /ip address
+                        vip_match = None
+                        if vname:
+                            vip_match = next((ip['address'] for ip in data['ips'] if ip['interface'] == vname), None)
+                        if not vip_match and iface:
+                            vip_match = next((ip['address'] for ip in data['ips'] if ip['interface'] == iface), None)
+
                         data['vrrp_groups'].append({
+                            'name': vname,
                             'interface': iface,
+                            'vrrp_interface': vname,
                             'address_family': 'ipv4',
                             'vr_id': int(vrid_match.group(0)),
-                            'virtual_ip': fields.get('version', ''),
+                            'virtual_ip': vip_match or '',
                             'priority': int(prio_match.group(0)) if prio_match else 100,
                             'version': fields.get('version', 'v3')
                         })
