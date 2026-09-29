@@ -51,8 +51,25 @@
 ### 4. ⚙️ Recursos Avançados de Execução
 - **Modo Simulação (`--dry-run`)**: Executa o parsing dos dados e exibe o resumo completo sem aplicar nenhuma alteração no NetBox.
 - **Sincronização Modular (`--sync-modules`)**: Permite selecionar exatamente quais módulos sincronizar (ex: `--sync-modules vlans,interfaces,ips` ou `all`).
+- **Modo de Depuração (`--debug`)**: Exibe logs detalhados durante a coleta, parsing e comunicação com a API do NetBox.
 - **Opções SSL e Segurança (`--insecure` / `DISABLE_SSL_VERIFY`)**: Suporte a ambientes com certificados SSL auto-assinados.
 - **Relatório Final da Execução**: Exibe um resumo formatado em tabela indicando o status de cada host processado e totais de sucesso/falha.
+
+---
+
+## 📌 Compatibilidade de API e Versão NetBox
+
+- **Versões da API**: Testado e compatível com as versões **v1 e v2** da API REST.
+- **Versão do NetBox**: Testado no **NetBox 4.6.8+**.
+
+---
+
+## 🤝 Contribuição & Suporte
+
+Contribuições são super bem-vindas! Se você encontrou algum problema ou tem sugestões de melhoria:
+
+- Sinta-se à vontade para abrir uma Issue descrevendo o bug ou a ideia de funcionalidade.
+- Envie um **Pull Request (PR)** com correções, novos drivers de fabricante ou novas funcionalidades.
 
 ---
 
@@ -97,6 +114,8 @@ netboxsync/
    ```
 
 ---
+
+> **Observação**: É recomendando que o **Device Type** (`device-type`) já esteja previamente cadastrado no NetBox antes de realizar a sincronização.
 
 ## 💻 Exemplos de Uso
 
