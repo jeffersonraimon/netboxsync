@@ -11,6 +11,7 @@ from drivers.registry import register_driver, get_driver, list_drivers
 import drivers.datacom_dmos
 import drivers.mikrotik_routeros
 import drivers.huawei_vrp
+import drivers.juniper_junos
 import drivers.template_driver
 
 __all__ = [

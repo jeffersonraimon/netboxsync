@@ -11,7 +11,7 @@
 | **Datacom DmOS** | `dmos` | **OK** | Interfaces físicas, VLANs, L3, LAGs, IPs (v4/v6), Transceivers, VRRP, VPWS/VPLS, LLDP. |
 | **Mikrotik RouterOS** | `routeros` | **OK** | Interfaces físicas, VLANs, Bridges, LAGs (Bonding), IPs (estáticos/dinâmicos/IPv6), VRRP, VPLS, LLDP, **Túneis VPN (`/vpn/tunnels/`)** (WireGuard, L2TP, PPTP, OpenVPN, SSTP). |
 | **Huawei VRP** | `huawei_vrp` | **OK** | Roteadores (AR/NE), switches (S/CE) e BNG/BRAS: interfaces físicas, subinterfaces (`vlan-type dot1q`), Vlanif/LoopBack/Tunnel/Virtual-*, Eth-Trunk (LAG) e membros (`eth-trunk N`), VLANs (`vlan batch` e `vlan N` + `description`), portas access/trunk/hybrid, IPs IPv4 (máscara decimal → CIDR) e IPv6, VRRP, **VPWS (`mpls l2vc`)**, **VPLS (`vsi` + `l2 binding vsi`)** e **QinQ de assinante BNG (`user-vlan ... qinq ...`)**, LLDP. |
-| **Juniper (JunOS)** | `junos` | 🟡 *Pendente* | Em desenvolvimento / Planejado. |
+| **Juniper (JunOS)** | `junos`, `juniper` | **OK** | Roteadores (MX) e switches (QFX/EX): interfaces físicas (`ge-`, `xe-`, `et-`), subinterfaces/unidades (`unit X`), interfaces L3/routed VLAN (`irb.X`), Loopback (`lo0`), LAGs (`aeX` / `802.3ad`), VLANs (modo access/trunk e inferência `-vVID`), IPs IPv4/IPv6, inventário de transceivers SFPs/QSFPs (`show chassis hardware`), vizinhos LLDP (`show lldp neighbors`). |
 | **Fortinet (FortiOS)** | `fortios` | 🟡 *Pendente* | Em desenvolvimento / Planejado. |
 | **A10 (AcOS)** | `acos` | 🟡 *Pendente* | Em desenvolvimento / Planejado. |
 | **Hillstone (StoneOS)** | `stoneos` | 🟡 *Pendente* | Em desenvolvimento / Planejado. |
