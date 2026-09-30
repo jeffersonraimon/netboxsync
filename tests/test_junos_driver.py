@@ -73,10 +73,23 @@ Chassis                                JN1234567890      MX240
     ]
 }"""
 
+    raw_pic_optics = """
+FPC slot 0, PIC slot 1 information:
+  Type                             MIC1
+  State                            Online
+
+PIC port information:
+                         Fiber                    Xcvr vendor       Wave-    Xcvr         JNPR
+  Port Cable type        type  Xcvr vendor        part number       length   Firmware     Rev
+  0    100GBASE SR4 T2   MM    GENERIC_VENDOR_A   GEN-PART-100G     850 nm   0.0          REV 01
+  1    100GBASE SR4 T2   MM    GENERIC_VENDOR_B   GEN-PART-200G     850 nm   0.0          REV 01
+"""
+
     raw_outputs = {
         "config": raw_config,
         "version": raw_version,
         "chassis_hardware": raw_chassis,
+        "pic_optics": raw_pic_optics,
         "lldp_json": raw_lldp
     }
 
@@ -121,11 +134,14 @@ Chassis                                JN1234567890      MX240
     assert '10.200.0.1/24' in ip_addrs
     assert '192.168.255.1/32' in ip_addrs
 
-    # 7. Inventory Items (Transceivers)
+    # 7. Inventory Items (Transceivers enriquecidos com pic_optics sintéticos)
     assert len(parsed['inventory_items']) == 2
     assert parsed['inventory_items'][0]['serial'] == 'SFP11223344'
-    assert parsed['inventory_items'][0]['part_id'] == '740-012345'
+    assert parsed['inventory_items'][0]['manufacturer'] == 'GENERIC_VENDOR_A'
+    assert parsed['inventory_items'][0]['part_id'] == 'GEN-PART-100G'
     assert parsed['inventory_items'][1]['serial'] == 'SFP55667788'
+    assert parsed['inventory_items'][1]['manufacturer'] == 'GENERIC_VENDOR_B'
+    assert parsed['inventory_items'][1]['part_id'] == 'GEN-PART-200G'
 
     # 8. LLDP Neighbors
     assert len(parsed['lldp_neighbors']) == 1

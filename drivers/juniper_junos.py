@@ -61,6 +61,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
             raw_outputs["version"] = send_cmd("show version")
             raw_outputs["config"] = send_cmd("show configuration | display set")
             raw_outputs["chassis_hardware"] = send_cmd("show chassis hardware")
+            raw_outputs["pic_optics"] = send_cmd("show chassis pic fpc-slot 0 pic-slot 1")
             raw_outputs["lldp_json"] = send_cmd("show lldp neighbors | display json")
 
         except Exception as e:
@@ -91,7 +92,8 @@ class JuniperJunosDriver(BaseDeviceDriver):
         lags, lag_members = self._parse_lags(config_raw)
         physical_ifaces, l3_units, interface_vlans = self._parse_interfaces(config_raw, lag_members)
         ips = self._parse_ips(config_raw)
-        inventory_items = self._parse_inventory(chassis_raw)
+        pic_optics_raw = raw_outputs.get("pic_optics", "")
+        inventory_items = self._parse_inventory(chassis_raw, pic_optics_raw)
         lldp_neighbors = self._parse_lldp(lldp_raw)
 
         # Construct final dict
@@ -319,28 +321,64 @@ class JuniperJunosDriver(BaseDeviceDriver):
                 })
         return ips
 
-    def _parse_inventory(self, chassis_raw: str) -> List[Dict[str, str]]:
+    def _parse_inventory(self, chassis_raw: str, pic_optics_raw: str = "") -> List[Dict[str, str]]:
         """
-        Extrai transceivers e módulos do show chassis hardware.
-        Ex: Xcvr 0 REV 01 740-061405 BB180419175 QSFP-100G-SR4-T2
+        Extrai transceivers e módulos do show chassis hardware e enriquece o Fabricante (Vendor)
+        através do comando show chassis pic fpc-slot X pic-slot Y.
         """
+        # 1. Mapear informações de Vendor / Part Number por porta a partir do show chassis pic
+        # Exemplo de linha do show chassis pic:
+        # 0    100GBASE SR4 T2   MM    PRECISION          PRE-QSFP28-SR4    850 nm   0.0          REV 01
+        port_optics_info = {}
+        if pic_optics_raw:
+            in_port_section = False
+            for line in pic_optics_raw.splitlines():
+                if "PIC port information:" in line:
+                    in_port_section = True
+                    continue
+                if in_port_section and line.strip() and not line.strip().startswith("Port") and not line.strip().startswith("Fiber"):
+                    parts = line.strip().split()
+                    # A primeira coluna é o número da porta/Xcvr (ex: 0, 1, 2, 4)
+                    if len(parts) >= 5 and parts[0].isdigit():
+                        port_idx = parts[0]
+                        # Procura o campo de fabricante (ex: PRECISION, OPTLASER, CISCO, FINISAR, JUNIPER, etc.)
+                        # O formato típico possui o port_idx na pos 0, e a partir da coluna Fiber type (MM/SM) o vendor
+                        vendor = "Juniper"
+                        vendor_pn = ""
+                        if "MM" in parts or "SM" in parts:
+                            idx = parts.index("MM") if "MM" in parts else parts.index("SM")
+                            if len(parts) > idx + 1:
+                                vendor = parts[idx + 1]
+                            if len(parts) > idx + 2:
+                                vendor_pn = parts[idx + 2]
+                        port_optics_info[port_idx] = {
+                            'vendor': vendor,
+                            'vendor_pn': vendor_pn
+                        }
+
         items = []
-        # Linhas do show chassis hardware contendo Xcvr
+        # 2. Linhas do show chassis hardware contendo Xcvr
         for line in chassis_raw.splitlines():
             if "Xcvr" in line:
                 parts = line.strip().split()
                 # Ex: ['Xcvr', '0', 'REV', '01', '740-061405', 'BB180419175', 'QSFP-100G-SR4-T2']
                 if len(parts) >= 6:
-                    xcvr_name = f"{parts[0]} {parts[1]}"
+                    xcvr_id = parts[1]
+                    xcvr_name = f"{parts[0]} {xcvr_id}"
                     pn = parts[4] if len(parts) >= 6 else ""
                     serial = parts[5] if len(parts) >= 6 else ""
                     model = parts[6] if len(parts) >= 7 else pn
 
+                    # Enriquecimento com dados do show chassis pic
+                    optics_data = port_optics_info.get(xcvr_id, {})
+                    manufacturer = optics_data.get('vendor', 'Juniper')
+                    vendor_pn = optics_data.get('vendor_pn', '')
+
                     items.append({
                         'interface': xcvr_name,
                         'name': f"Transceiver {xcvr_name}",
-                        'manufacturer': "Juniper",
-                        'part_id': pn,
+                        'manufacturer': manufacturer,
+                        'part_id': vendor_pn if vendor_pn else pn,
                         'serial': serial
                     })
         return items
