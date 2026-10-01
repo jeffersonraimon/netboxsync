@@ -3,6 +3,7 @@ Modulo de Sincronizacao com a API do NetBox
 """
 
 import re
+import ipaddress
 import urllib3
 from datetime import datetime
 import pynetbox
@@ -872,14 +873,20 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
             if iface_target:
                 iface_id = getattr(iface_target, 'id', getattr(iface_target, 'pk', None))
                 raw_ip_str = ip_info['address']
-                clean_host_ip = raw_ip_str.split('/')[0]
+                try:
+                    ip_iface_obj = ipaddress.ip_interface(raw_ip_str)
+                    canonical_ip_str = str(ip_iface_obj)
+                    clean_host_ip = str(ip_iface_obj.ip)
+                except Exception:
+                    canonical_ip_str = raw_ip_str
+                    clean_host_ip = raw_ip_str.split('/')[0]
 
                 # Se for Network ID (ex: 2001:db8:1::/64 ou 10.0.0.0/24), não deve ser atribuído à interface
-                if raw_ip_str.endswith('::/64') or raw_ip_str.endswith('.0/24'):
+                if canonical_ip_str.endswith('::/64') or canonical_ip_str.endswith('.0/24') or raw_ip_str.endswith('::/64') or raw_ip_str.endswith('.0/24'):
                     continue
 
                 # 1. Busca exata pelo endereço completo (ex: fd10:1:20::254/64)
-                ip_obj = safe_get(nb.ipam.ip_addresses, address=raw_ip_str, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=raw_ip_str)
+                ip_obj = safe_get(nb.ipam.ip_addresses, address=canonical_ip_str, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=canonical_ip_str) or safe_get(nb.ipam.ip_addresses, address=raw_ip_str, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=raw_ip_str)
 
                 # 2. Se não encontrou, busca por filter ignorando o prefixo da máscara (procura pelo Host IP puro ex: fd10:1:20::254)
                 if not ip_obj:
@@ -889,9 +896,9 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
                 try:
                     if not ip_obj:
-                        print(f"[+] Criando IP {ip_info['address']} na VRF '{vrf_name}' (Interface: {iface_target.name})")
+                        print(f"[+] Criando IP {canonical_ip_str} na VRF '{vrf_name}' (Interface: {iface_target.name})")
                         ip_obj = nb.ipam.ip_addresses.create(
-                            address=ip_info['address'],
+                            address=canonical_ip_str,
                             vrf=vrf_id,
                             assigned_object_type='dcim.interface',
                             assigned_object_id=iface_id,
@@ -899,9 +906,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         )
                     else:
                         need_ip_save = False
-                        if ip_obj.address != raw_ip_str:
-                            print(f"[➔] Atualizando máscara do IP {ip_obj.address} -> {raw_ip_str}")
-                            ip_obj.address = raw_ip_str
+                        cur_ip_str = getattr(ip_obj, 'address', '')
+                        try:
+                            cur_ip_canonical = str(ipaddress.ip_interface(cur_ip_str))
+                        except Exception:
+                            cur_ip_canonical = cur_ip_str
+
+                        if cur_ip_canonical != canonical_ip_str:
+                            print(f"[➔] Atualizando máscara do IP {cur_ip_str} -> {canonical_ip_str}")
+                            ip_obj.address = canonical_ip_str
                             need_ip_save = True
 
                         cur_ass_type = getattr(ip_obj, 'assigned_object_type', None)
@@ -915,7 +928,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             ip_obj.assigned_object_type = 'dcim.interface'
                             need_ip_save = True
                         if cur_ass_id != iface_id:
-                            print(f"[➔] Atribuindo IP {ip_info['address']} à interface '{iface_target.name}' no NetBox...")
+                            print(f"[➔] Atribuindo IP {canonical_ip_str} à interface '{iface_target.name}' no NetBox...")
                             ip_obj.assigned_object_id = iface_id
                             need_ip_save = True
 
@@ -927,7 +940,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         if need_ip_save:
                             ip_obj.save()
                 except Exception as ip_err:
-                    print(f"[!] Aviso ao criar/atualizar IP {ip_info['address']} (Interface: {iface_target.name}): {ip_err}")
+                    print(f"[!] Aviso ao criar/atualizar IP {canonical_ip_str} (Interface: {iface_target.name}): {ip_err}")
                     continue
 
                 # Se for a interface lo0.0 (ou lo0 / loopback0), guarda o ID do IP para marcar como primario do dispositivo
@@ -984,20 +997,22 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 if not vip_addr:
                     continue
 
+                full_vip = vip_addr if '/' in vip_addr else (f"{vip_addr}/32" if ':' not in vip_addr else f"{vip_addr}/128")
+                try:
+                    canonical_vip = str(ipaddress.ip_interface(full_vip))
+                except Exception:
+                    canonical_vip = full_vip
+
                 # Garante que o IP virtual existe na VRF
-                ip_vrrp_obj = safe_get(nb.ipam.ip_addresses, address=vip_addr, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=vip_addr)
+                ip_vrrp_obj = safe_get(nb.ipam.ip_addresses, address=canonical_vip, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=canonical_vip) or safe_get(nb.ipam.ip_addresses, address=full_vip, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=full_vip)
                 if not ip_vrrp_obj:
-                    # Se nao tiver mascara no IP virtual, adiciona /32 ou /128
-                    full_vip = vip_addr if '/' in vip_addr else (f"{vip_addr}/32" if ':' not in vip_addr else f"{vip_addr}/128")
-                    ip_vrrp_obj = safe_get(nb.ipam.ip_addresses, address=full_vip, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=full_vip)
-                    if not ip_vrrp_obj:
-                        print(f"[+] Criando IP Virtual VRRP {full_vip} no NetBox...")
-                        ip_vrrp_obj = nb.ipam.ip_addresses.create(
-                            address=full_vip,
-                            vrf=vrf_id,
-                            status='active',
-                            description=f"VRRP Virtual IP Group {vr_id} ({vrrp_name or ''})"
-                        )
+                    print(f"[+] Criando IP Virtual VRRP {canonical_vip} no NetBox...")
+                    ip_vrrp_obj = nb.ipam.ip_addresses.create(
+                        address=canonical_vip,
+                        vrf=vrf_id,
+                        status='active',
+                        description=f"VRRP Virtual IP Group {vr_id} ({vrrp_name or ''})"
+                    )
                 
                 vip_id = getattr(ip_vrrp_obj, 'id', getattr(ip_vrrp_obj, 'pk', None))
                 
