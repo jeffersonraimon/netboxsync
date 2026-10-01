@@ -124,9 +124,37 @@ class JuniperJunosDriver(BaseDeviceDriver):
         serial = self._parse_serial(chassis_raw)
 
         # 2. Extract Data Structures
+        logical_systems = self._parse_logical_systems(config_raw)
         vlans = self._parse_vlans(config_raw)
         lags, lag_members = self._parse_lags(config_raw)
         physical_ifaces, l3_units, interface_vlans, interface_untagged_vlans = self._parse_interfaces(config_raw, lag_members)
+        
+        # Atribui VDCs às interfaces associadas aos logical-systems
+        if logical_systems:
+            iface_to_ls = {}
+            for ls_name, ifaces in logical_systems.items():
+                vdc_name = f"{hostname}-{ls_name}"
+                for if_name in ifaces:
+
+                    iface_to_ls[if_name] = vdc_name
+            
+            existing_if_names = {i['name'] for i in physical_ifaces}.union({i['name'] for i in l3_units}).union({i['name'] for i in lags})
+            for if_name, vdc_name in iface_to_ls.items():
+                if if_name not in existing_if_names:
+                    # Registra a interface caso ela tenha sido declarada apenas no bloco do logical-system
+                    l3_units.append({'name': if_name, 'description': '', 'vlan': 0})
+            
+            for item in physical_ifaces:
+                if item['name'] in iface_to_ls:
+                    item['vdc'] = iface_to_ls[item['name']]
+            for item in l3_units:
+                if item['name'] in iface_to_ls:
+                    item['vdc'] = iface_to_ls[item['name']]
+            for item in lags:
+                if item['name'] in iface_to_ls:
+                    item['vdc'] = iface_to_ls[item['name']]
+
+
         ips = self._parse_ips(config_raw)
         pic_optics_raw = raw_outputs.get("pic_optics", "")
         optics_diag_raw = raw_outputs.get("optics_diag", "")
@@ -139,6 +167,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
             'serial': serial,
             'model': model,
             'tags': {'junos', 'juniper'},
+            'logical_systems': logical_systems,
             'vlans': vlans,
             'interfaces_physical': physical_ifaces,
             'interfaces_l3': l3_units,
@@ -154,6 +183,30 @@ class JuniperJunosDriver(BaseDeviceDriver):
             'vlan_roles_map': {},
             'vpn_tunnels': []
         }
+
+    def _parse_logical_systems(self, config_raw: str) -> Dict[str, List[str]]:
+        """
+        Extrai os Logical Systems e suas interfaces associadas.
+        Ex: set logical-systems LS-VOAFIBRA_267388 interfaces ae4 unit 1103
+        -> {"LS-VOAFIBRA_267388": ["ae4.1103"]}
+        """
+        ls_map = {}
+        for line in config_raw.splitlines():
+            line = line.strip()
+            # Captura: set logical-systems <LS_NAME> interfaces <IF_NAME> [unit <UNIT>]
+            match = re.search(r'set logical-systems (\S+) interfaces (\S+)(?:\s+unit\s+(\d+))?', line)
+            if match:
+                ls_name = match.group(1)
+                base_if = match.group(2)
+                unit_id = match.group(3)
+                iface_name = f"{base_if}.{unit_id}" if unit_id else base_if
+                
+                if ls_name not in ls_map:
+                    ls_map[ls_name] = []
+                if iface_name not in ls_map[ls_name]:
+                    ls_map[ls_name].append(iface_name)
+        return ls_map
+
 
     def normalize_interface_type(self, if_name: str) -> str:
         if not if_name:
@@ -327,8 +380,12 @@ class JuniperJunosDriver(BaseDeviceDriver):
         lines = config_raw.splitlines()
         for line in lines:
             line = line.strip()
-            if not line.startswith("set interfaces "):
+            # Remove o prefixo set logical-systems <LS> se presente para parsear a interface corretamente
+            line_if = re.sub(r'^set\s+logical-systems\s+\S+\s+', 'set ', line)
+            if not line_if.startswith("set interfaces "):
                 continue
+            line = line_if
+
 
             # Ex: set interfaces ge-0/0/0 description "SERVER"
             parts = line.split()
@@ -394,10 +451,11 @@ class JuniperJunosDriver(BaseDeviceDriver):
                                     interface_vlans[target_if] = set()
                                 interface_vlans[target_if].add(v_id)
 
-                    # Checa se é uma interface L3 (possui IP / family inet/inet6 ou é irb/lo0/vlan)
+                    # Checa se é uma subinterface L3/L2 (possui IP / family inet/inet6, possui vlan-id, unit > 0, ou irb/lo0/vlan)
                     has_inet = "family inet" in line or "family inet6" in line
-                    is_l3_type = base_if.startswith(("irb", "vlan", "lo0", "ge-", "xe-", "et-", "ae", "me", "em", "fxp"))
-                    if has_inet or base_if.startswith(("irb", "vlan", "lo0")):
+                    has_vlan_id = bool(m_vlan_id)
+                    is_unit_subif = unit_id != "0" or base_if.startswith(("irb", "vlan", "lo0"))
+                    if has_inet or has_vlan_id or is_unit_subif:
                         v_id = int(unit_id) if unit_id.isdigit() else 0
                         # Evita duplicatas na lista de L3
                         existing_l3 = next((l3 for l3 in l3_units if l3['name'] == unit_name), None)
@@ -405,6 +463,8 @@ class JuniperJunosDriver(BaseDeviceDriver):
                             l3_units.append({'name': unit_name, 'vlan': v_id, 'description': unit_desc})
                         elif unit_desc and not existing_l3.get('description'):
                             existing_l3['description'] = unit_desc
+
+
 
             # Captura de descrição explícita para qualquer interface física ou subinterface (ex: ae4, ae4.9, et-0/1/5.1751)
             if " description " in line:

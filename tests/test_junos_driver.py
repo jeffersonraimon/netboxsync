@@ -211,12 +211,48 @@ PIC port information:
     assert items[0]['interface'] == 'et-0/0/49'
     assert items[0]['manufacturer'] == 'XXX'
     assert items[0]['part_id'] == 'OPT8XXXX0D'
-    assert items[0]['serial'] == '3XXXXX00715190'
+    assert items[0]['serial'] == '30JXXXX15190'
 
     # Transceiver 50
     assert items[1]['interface'] == 'et-0/0/50'
-    assert items[1]['manufacturer'] == 'XXXXXXXX'
+    assert items[1]['manufacturer'] == 'XXXXXXXXXXX'
     assert items[1]['part_id'] == 'PRE-QSFP28-SR4'
-    assert items[1]['serial'] == 'INKXXXXX841'
+    assert items[1]['serial'] == 'INKAZ3XXX41'
+
+
+def test_junos_logical_systems():
+    raw_config = """
+set system host-name RT-AAA-01
+set logical-systems LS-TESTE interfaces ae4 unit 1103
+set logical-systems LS-TESTE interfaces ae4 unit 1104
+set logical-systems LS3 interfaces lt-0/0/0 unit 1
+set logical-systems LS3 interfaces et-0/1/5 unit 3500
+set interfaces ae4 unit 1103 description "TEST VOAFIBRA 1103"
+set interfaces ae4 unit 1104 description "TEST VOAFIBRA 1104"
+"""
+    driver = JuniperJunosDriver()
+    data = driver.parse_data({"config": raw_config})
+
+
+    assert "logical_systems" in data
+    assert "LS-TESTE" in data["logical_systems"]
+    assert "ae4.1103" in data["logical_systems"]["LS-TESTE"]
+    assert "ae4.1104" in data["logical_systems"]["LS-TESTE"]
+
+    assert "LS3" in data["logical_systems"]
+    assert "lt-0/0/0.1" in data["logical_systems"]["LS3"]
+    assert "et-0/1/5.3500" in data["logical_systems"]["LS3"]
+
+    # Verifica se a propriedade 'vdc' foi atribuída nas subinterfaces L3/physical
+    ae4_1103 = next((i for i in data["interfaces_l3"] if i["name"] == "ae4.1103"), None)
+    assert ae4_1103 is not None
+    assert ae4_1103["vdc"] == "RT-AAA-01-LS-TESTE"
+
+    et_3500 = next((i for i in data["interfaces_l3"] if i["name"] == "et-0/1/5.3500"), None)
+    assert et_3500 is not None
+    assert et_3500["vdc"] == "RT-AAA-01-LS3"
+
+
+
 
 

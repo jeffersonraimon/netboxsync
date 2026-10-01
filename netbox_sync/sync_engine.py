@@ -337,6 +337,26 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
     device_id = getattr(device, 'id', getattr(device, 'pk', None))
 
+    # 3.5. Sincronizar Virtual Device Contexts (VDCs / Logical Systems)
+    vdcs_cache = {}
+    logical_systems = data.get('logical_systems', {})
+    if logical_systems:
+        for ls_name in logical_systems.keys():
+            vdc_name = f"{hostname}-{ls_name}"
+            vdc_obj = safe_get(nb.dcim.virtual_device_contexts, name=vdc_name, device_id=device_id)
+            if not vdc_obj:
+                print(f"[+] Criando Virtual Device Context '{vdc_name}' no NetBox para {hostname}...")
+                try:
+                    vdc_obj = nb.dcim.virtual_device_contexts.create(
+                        name=vdc_name,
+                        device=device_id,
+                        status='active'
+                    )
+                except Exception as vdc_err:
+                    print(f"[!] Erro ao criar VDC '{vdc_name}': {vdc_err}")
+            if vdc_obj:
+                vdcs_cache[vdc_name] = getattr(vdc_obj, 'id', getattr(vdc_obj, 'pk', None))
+
     # 4. Garantir criação das VLAN Roles no NetBox
     vlan_roles_cache = {}
     required_roles = ["PTP-EQUIPAMENTOS", "VPWS-TUNEIS", "VPLS-TUNEIS"]
@@ -447,18 +467,25 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     if_type = '10gbase-x-sfpp'
 
                 if_desc = iface.get('description', '')
+                if_vdc_name = iface.get('vdc')
+                if_vdc_id = vdcs_cache.get(if_vdc_name) if if_vdc_name else None
+
 
                 if not nb_iface:
-                    print(f"[+] Criando Interface {if_name} no NetBox...")
-                    nb_iface = nb.dcim.interfaces.create(
-                        device=device_id,
-                        name=if_name,
-                        type=if_type,
-                        label=if_desc,
-                        description=if_desc,
-                        enabled=iface.get('enabled', True),
-                        mtu=iface.get('mtu')
-                    )
+                    print(f"[+] Criando Interface {if_name} no NetBox..." + (f" (VDC: {if_vdc_name})" if if_vdc_name else ""))
+                    create_kwargs = {
+                        'device': device_id,
+                        'name': if_name,
+                        'type': if_type,
+                        'label': if_desc,
+                        'description': if_desc,
+                        'enabled': iface.get('enabled', True),
+                        'mtu': iface.get('mtu')
+                    }
+                    if if_vdc_id:
+                        create_kwargs['vdc'] = if_vdc_id
+
+                    nb_iface = nb.dcim.interfaces.create(**create_kwargs)
                     existing_ifaces_map[if_name] = nb_iface
                     # Registra as variacoes espaco/hifen (fallback) para que referencias de LAG/VLAN
                     # encontrem a interface recem-criada ainda nesta mesma execucao
@@ -483,11 +510,22 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     if iface.get('mtu') and nb_iface.mtu != iface.get('mtu'):
                         nb_iface.mtu = iface.get('mtu')
                         need_save = True
+                    cur_vdc = getattr(nb_iface, 'vdc', None)
+                    cur_vdc_id = getattr(cur_vdc, 'id', cur_vdc) if cur_vdc else None
+                    if if_vdc_id and cur_vdc_id != if_vdc_id:
+                        print(f"[➔] Atribuindo VDC '{if_vdc_name}' para a interface {nb_iface.name}")
+                        try:
+                            setattr(nb_iface, 'vdc', if_vdc_id)
+                            need_save = True
+                        except Exception as set_vdc_err:
+                            print(f"[!] Erro ao definir VDC na interface {nb_iface.name}: {set_vdc_err}")
+
                     if need_save:
                         try:
                             nb_iface.save()
                         except Exception as save_err:
                             print(f"[!] Aviso ao salvar dados da interface {nb_iface.name}: {save_err}")
+
 
                 if nb_iface:
                     # Busca VLANs vinculadas testando variações do nome da interface (espaço vs hífen)
