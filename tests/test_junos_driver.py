@@ -287,4 +287,66 @@ def test_junos_normalize_virtual_interfaces():
     assert driver.normalize_interface_type("gr-0/0/0.0") == "virtual"
 
 
+def test_junos_dynamic_tags_detection():
+    config_protocols = """
+set system host-name TEST-TAGS-ROUTER
+set protocols bgp group EXT type external
+set protocols ospf area 0.0.0.0 interface ge-0/0/0.0
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/0.0
+set protocols isis interface ge-0/0/1.0
+set protocols mpls interface ge-0/0/0.0
+set protocols ldp interface ge-0/0/0.0
+set protocols rsvp interface ge-0/0/0.0
+set protocols evpn encapsulation vxlan
+set protocols vxlan vni-options
+set protocols bgp group EXT neighbor 1.1.1.1 bfd-liveness-detection minimum-interval 300
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.0.1/24 vrrp-group 1 virtual-address 10.0.0.254
+set protocols igmp-snooping vlan default
+set logical-systems LS-TEST protocols bgp group INT type internal
+"""
+    driver = JuniperJunosDriver()
+    parsed = driver.parse_data({"config": config_protocols})
+    tags = parsed['tags']
+
+    assert 'junos' in tags
+    assert 'juniper' in tags
+    assert 'BGP' in tags
+    assert 'OSPF' in tags
+    assert 'OSPFv3' in tags
+    assert 'ISIS' in tags
+    assert 'MPLS' in tags
+    assert 'LDP' in tags
+    assert 'RSVP' in tags
+    assert 'EVPN' in tags
+    assert 'VXLAN' in tags
+    assert 'BFD' in tags
+    assert 'VRRP' in tags
+    assert 'IGMP-Snooping' in tags
+    assert 'Logical-Systems' in tags
+
+
+def test_junos_tags_with_real_config_file():
+    import os
+    config_path = "config_junos.txt"
+    if not os.path.exists(config_path):
+        return
+
+    with open(config_path) as f:
+        raw_cfg = f.read()
+
+    driver = JuniperJunosDriver()
+    parsed = driver.parse_data({"config": raw_cfg})
+    tags = parsed['tags']
+
+    assert 'junos' in tags
+    assert 'juniper' in tags
+    assert 'BGP' in tags
+    assert 'OSPF' in tags
+    assert 'OSPFv3' in tags
+    assert 'BFD' in tags
+    assert 'Flowspec' in tags
+    assert 'Logical-Systems' in tags
+
+
+
 

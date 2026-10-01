@@ -109,14 +109,32 @@ class JuniperJunosDriver(BaseDeviceDriver):
 
         return raw_outputs
 
-    def parse_data(self, raw_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    def parse_data(self, raw_outputs: Any) -> Dict[str, Any]:
         """
         Parses raw CLI outputs into standard NetBox sync payload.
+        Suporta tanto dicionário com comandos SSH quanto string direta de arquivo local.
         """
-        config_raw = raw_outputs.get("config", "")
-        version_raw = raw_outputs.get("version", "")
-        chassis_raw = raw_outputs.get("chassis_hardware", "")
-        lldp_raw = raw_outputs.get("lldp_json", "")
+        if isinstance(raw_outputs, str):
+            config_raw = raw_outputs
+            version_raw = ""
+            chassis_raw = ""
+            lldp_raw = ""
+            pic_optics_raw = ""
+            optics_diag_raw = ""
+        elif isinstance(raw_outputs, dict):
+            config_raw = raw_outputs.get("config", "") or raw_outputs.get("show configuration | display set", "")
+            version_raw = raw_outputs.get("version", "") or raw_outputs.get("show version", "")
+            chassis_raw = raw_outputs.get("chassis_hardware", "") or raw_outputs.get("show chassis hardware", "")
+            lldp_raw = raw_outputs.get("lldp_json", "") or raw_outputs.get("lldp", "")
+            pic_optics_raw = raw_outputs.get("pic_optics", "")
+            optics_diag_raw = raw_outputs.get("optics_diag", "")
+        else:
+            config_raw = ""
+            version_raw = ""
+            chassis_raw = ""
+            lldp_raw = ""
+            pic_optics_raw = ""
+            optics_diag_raw = ""
 
         # Extrai os itens desativados (`deactivate ...`) para ignorá-los no parsing
         deactivated_ifaces, deactivated_lines = self._parse_deactivated(config_raw)
@@ -178,17 +196,17 @@ class JuniperJunosDriver(BaseDeviceDriver):
         ips = self._parse_ips(config_raw_active)
         ips = [ip for ip in ips if ip['interface'] not in deactivated_ifaces]
 
-        pic_optics_raw = raw_outputs.get("pic_optics", "")
-        optics_diag_raw = raw_outputs.get("optics_diag", "")
         inventory_items = self._parse_inventory(chassis_raw, pic_optics_raw, optics_diag_raw)
         lldp_neighbors = self._parse_lldp(lldp_raw)
+
+        tags = self._parse_tags(config_raw_active)
 
         # Construct final dict
         return {
             'hostname': hostname,
             'serial': serial,
             'model': model,
-            'tags': {'junos', 'juniper'},
+            'tags': tags,
             'logical_systems': logical_systems,
             'vlans': vlans,
             'interfaces_physical': physical_ifaces,
@@ -205,6 +223,67 @@ class JuniperJunosDriver(BaseDeviceDriver):
             'vlan_roles_map': {},
             'vpn_tunnels': []
         }
+
+    def _parse_tags(self, config_raw: str) -> Set[str]:
+        """
+        Detecta dinamicamente protocolos e recursos configurados no JunOS para geracao de Tags.
+        Identifica configuracoes tanto no nivel global quanto dentro de logical-systems e routing-instances.
+        """
+        tags = {'junos', 'juniper'}
+        if not config_raw:
+            return tags
+
+        # 1. Roteamento Unicast
+        if re.search(r'(?:^|\s)(?:logical-systems\s+\S+\s+)?(?:routing-instances\s+\S+\s+)?protocols\s+bgp\b', config_raw):
+            tags.add('BGP')
+        if re.search(r'(?:^|\s)(?:logical-systems\s+\S+\s+)?(?:routing-instances\s+\S+\s+)?protocols\s+ospf\b', config_raw):
+            tags.add('OSPF')
+        if re.search(r'(?:^|\s)(?:logical-systems\s+\S+\s+)?(?:routing-instances\s+\S+\s+)?protocols\s+ospf3\b', config_raw):
+            tags.add('OSPFv3')
+        if re.search(r'(?:^|\s)(?:logical-systems\s+\S+\s+)?(?:routing-instances\s+\S+\s+)?protocols\s+isis\b', config_raw):
+            tags.add('ISIS')
+        if re.search(r'(?:^|\s)(?:logical-systems\s+\S+\s+)?(?:routing-instances\s+\S+\s+)?protocols\s+rip\b', config_raw):
+            tags.add('RIP')
+
+        # 2. Resiliencia e Redundancia (BFD, VRRP)
+        if re.search(r'bfd-liveness-detection|\bprotocols\s+bfd\b', config_raw, re.IGNORECASE):
+            tags.add('BFD')
+        if re.search(r'\bvrrp-group\b', config_raw, re.IGNORECASE):
+            tags.add('VRRP')
+
+        # 3. MPLS e Engenharia de Trafego
+        if re.search(r'(?:protocols\s+mpls\b|family\s+mpls\b)', config_raw, re.IGNORECASE):
+            tags.add('MPLS')
+        if re.search(r'protocols\s+ldp\b', config_raw, re.IGNORECASE):
+            tags.add('LDP')
+        if re.search(r'protocols\s+rsvp\b', config_raw, re.IGNORECASE):
+            tags.add('RSVP')
+        if re.search(r'source-packet-routing|spring\b', config_raw, re.IGNORECASE):
+            tags.add('Segment-Routing')
+
+        # 4. VPNs L2/L3 e EVPN/VXLAN
+        if re.search(r'(?:protocols\s+l2circuit\b|protocols\s+vpls\b|instance-type\s+(?:l2vpn|vpls)\b|encapsulation\s+(?:vpls|ethernet-vpls|vlan-vpls)\b)', config_raw, re.IGNORECASE):
+            tags.add('MPLS-L2VPN')
+        if re.search(r'(?:protocols\s+evpn\b|instance-type\s+evpn\b)', config_raw, re.IGNORECASE):
+            tags.add('EVPN')
+        if re.search(r'(?:protocols\s+vxlan\b|\bvxlan\b)', config_raw, re.IGNORECASE):
+            tags.add('VXLAN')
+
+        # 5. Flowspec e Monitoramento de Fluxo
+        if re.search(r'family\s+(?:inet|inet6)\s+flow\b|\brib\s+inetflow\.0\b|\bCOMM-FLOWSPEC\b|\bflowspec\b', config_raw, re.IGNORECASE):
+            tags.add('Flowspec')
+
+        # 6. Arquitetura Logical Systems
+        if re.search(r'^\s*set\s+logical-systems\s+\S+', config_raw, re.MULTILINE):
+            tags.add('Logical-Systems')
+
+        # 7. Switching / Multicast
+        if re.search(r'protocols\s+igmp-snooping\b', config_raw, re.IGNORECASE):
+            tags.add('IGMP-Snooping')
+        if re.search(r'protocols\s+pim\b', config_raw, re.IGNORECASE):
+            tags.add('PIM')
+
+        return tags
 
     def _parse_deactivated(self, config_raw: str) -> tuple[Set[str], Set[str]]:
         """
