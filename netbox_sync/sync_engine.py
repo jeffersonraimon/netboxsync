@@ -483,9 +483,17 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         'mtu': iface.get('mtu')
                     }
                     if if_vdc_id:
-                        create_kwargs['vdc'] = if_vdc_id
+                        create_kwargs['vdcs'] = [if_vdc_id]
 
-                    nb_iface = nb.dcim.interfaces.create(**create_kwargs)
+                    try:
+                        nb_iface = nb.dcim.interfaces.create(**create_kwargs)
+                    except Exception as cr_err:
+                        if if_vdc_id and 'vdcs' in create_kwargs:
+                            create_kwargs.pop('vdcs')
+                            create_kwargs['vdc'] = if_vdc_id
+                            nb_iface = nb.dcim.interfaces.create(**create_kwargs)
+                        else:
+                            raise cr_err
                     existing_ifaces_map[if_name] = nb_iface
                     # Registra as variacoes espaco/hifen (fallback) para que referencias de LAG/VLAN
                     # encontrem a interface recem-criada ainda nesta mesma execucao
@@ -510,21 +518,28 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     if iface.get('mtu') and nb_iface.mtu != iface.get('mtu'):
                         nb_iface.mtu = iface.get('mtu')
                         need_save = True
-                    cur_vdc = getattr(nb_iface, 'vdc', None)
-                    cur_vdc_id = getattr(cur_vdc, 'id', cur_vdc) if cur_vdc else None
-                    if if_vdc_id and cur_vdc_id != if_vdc_id:
+                    cur_vdcs_raw = getattr(nb_iface, 'vdcs', None)
+                    if cur_vdcs_raw is not None:
+                        cur_vdc_ids = [getattr(v, 'id', getattr(v, 'pk', v)) for v in (cur_vdcs_raw or [])]
+                    else:
+                        cur_vdc = getattr(nb_iface, 'vdc', None)
+                        cur_vdc_ids = [getattr(cur_vdc, 'id', getattr(cur_vdc, 'pk', cur_vdc))] if cur_vdc else []
+
+                    if if_vdc_id and cur_vdc_ids != [if_vdc_id]:
                         print(f"[➔] Atribuindo VDC '{if_vdc_name}' para a interface {nb_iface.name}")
                         try:
-                            setattr(nb_iface, 'vdc', if_vdc_id)
-                            need_save = True
-                        except Exception as set_vdc_err:
-                            print(f"[!] Erro ao definir VDC na interface {nb_iface.name}: {set_vdc_err}")
-
+                            nb_iface.update({'vdcs': [if_vdc_id]})
+                        except Exception as update_vdc_err:
+                            try:
+                                nb_iface.update({'vdc': if_vdc_id})
+                            except Exception as save_vdc_err:
+                                print(f"[!] Erro ao definir VDC na interface {nb_iface.name}: {save_vdc_err}")
                     if need_save:
                         try:
                             nb_iface.save()
                         except Exception as save_err:
                             print(f"[!] Aviso ao salvar dados da interface {nb_iface.name}: {save_err}")
+
 
 
                 if nb_iface:
@@ -638,48 +653,53 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 # Preserva a descrição e rótulo existentes caso já tenham sido definidos no NetBox/primeiro bloco
                                 cur_desc = getattr(nb_iface, 'description', '')
                                 cur_lbl = getattr(nb_iface, 'label', '')
+                                cur_vdcs_val = getattr(nb_iface, 'vdcs', None)
+                                if cur_vdcs_val is not None:
+                                    cur_vdc_ids_val = [getattr(v, 'id', getattr(v, 'pk', v)) for v in (cur_vdcs_val or [])]
+                                else:
+                                    cur_vdc_val = getattr(nb_iface, 'vdc', None)
+                                    cur_vdc_ids_val = [getattr(cur_vdc_val, 'id', cur_vdc_val)] if cur_vdc_val else []
+
+                                update_payload = {}
+                                target_vdcs = [if_vdc_id] if if_vdc_id else cur_vdc_ids_val
+                                if target_vdcs:
+                                    if cur_vdcs_val is not None:
+                                        update_payload['vdcs'] = target_vdcs
+                                    else:
+                                        update_payload['vdc'] = target_vdcs[0]
 
                                 if target_mode == 'tagged':
-                                    nb_iface.mode = 'tagged'
-                                    nb_iface.untagged_vlan = untagged_target_id
-                                    nb_iface.tagged_vlans = list(target_tagged_set)
-                                    if cur_desc and not nb_iface.description:
-                                        nb_iface.description = cur_desc
-                                    if cur_lbl and not nb_iface.label:
-                                        nb_iface.label = cur_lbl
-                                    nb_iface.save()
+                                    update_payload.update({
+                                        'mode': 'tagged',
+                                        'untagged_vlan': untagged_target_id,
+                                        'tagged_vlans': list(target_tagged_set)
+                                    })
                                 elif target_mode == 'access':
-                                    if cur_mode == 'tagged' and cur_tagged_set:
-                                        nb_iface.mode = 'tagged'
-                                        nb_iface.tagged_vlans = []
-                                        if cur_desc and not nb_iface.description:
-                                            nb_iface.description = cur_desc
-                                        if cur_lbl and not nb_iface.label:
-                                            nb_iface.label = cur_lbl
-                                        nb_iface.save()
-                                    nb_iface.mode = 'access'
-                                    nb_iface.untagged_vlan = untagged_target_id
-                                    if cur_desc and not nb_iface.description:
-                                        nb_iface.description = cur_desc
-                                    if cur_lbl and not nb_iface.label:
-                                        nb_iface.label = cur_lbl
-                                    nb_iface.save()
+                                    update_payload.update({
+                                        'mode': 'access',
+                                        'untagged_vlan': untagged_target_id,
+                                        'tagged_vlans': []
+                                    })
                                 else:
-                                    if cur_mode == 'tagged' and cur_tagged_set:
-                                        nb_iface.mode = 'tagged'
-                                        nb_iface.tagged_vlans = []
-                                        if cur_desc and not nb_iface.description:
-                                            nb_iface.description = cur_desc
-                                        if cur_lbl and not nb_iface.label:
-                                            nb_iface.label = cur_lbl
+                                    update_payload.update({
+                                        'mode': None,
+                                        'untagged_vlan': None,
+                                        'tagged_vlans': []
+                                    })
+                                
+                                try:
+                                    nb_iface.update(update_payload)
+                                except Exception:
+                                    if 'vdcs' in update_payload and cur_vdcs_val is None:
+                                        update_payload['vdc'] = update_payload.pop('vdcs')[0]
+                                        try:
+                                            nb_iface.update(update_payload)
+                                        except Exception:
+                                            nb_iface.save()
+                                    else:
                                         nb_iface.save()
-                                    nb_iface.mode = None
-                                    nb_iface.untagged_vlan = None
-                                    if cur_desc and not nb_iface.description:
-                                        nb_iface.description = cur_desc
-                                    if cur_lbl and not nb_iface.label:
-                                        nb_iface.label = cur_lbl
-                                    nb_iface.save()
+
+
                             except Exception as tag_err:
                                 print(f"[!] Aviso ao salvar VLANs em {nb_iface.name}: {tag_err}")
             except Exception as iface_err:
