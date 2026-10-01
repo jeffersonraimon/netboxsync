@@ -407,7 +407,18 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
     # 5. Sincronizar Interfaces (Fisicas, LAGs e L3)
     if any(m in sync_modules for m in ['interfaces', 'interface', 'ifaces', 'iface']):
-        all_interfaces = data['lags'] + data['interfaces_physical'] + data['interfaces_l3']
+        # Deduplica interfaces em all_interfaces combinando lags, physical e l3
+        merged_ifaces_map = {}
+        for item in (data['lags'] + data['interfaces_physical'] + data['interfaces_l3']):
+            iname = item['name']
+            if iname not in merged_ifaces_map:
+                merged_ifaces_map[iname] = dict(item)
+            else:
+                # Se ja existe mas a nova entrada possui descricao nao vazia, atualiza
+                if item.get('description') and not merged_ifaces_map[iname].get('description'):
+                    merged_ifaces_map[iname]['description'] = item['description']
+
+        all_interfaces = list(merged_ifaces_map.values())
         for iface in all_interfaces:
             if_name = iface['name']
             try:
@@ -586,26 +597,50 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             print(f"[➔] Interface {nb_iface.name} configurada com " + " | ".join(log_info if log_info else ["Mode: None"]))
 
                             try:
+                                # Preserva a descrição e rótulo existentes caso já tenham sido definidos no NetBox/primeiro bloco
+                                cur_desc = getattr(nb_iface, 'description', '')
+                                cur_lbl = getattr(nb_iface, 'label', '')
+
                                 if target_mode == 'tagged':
                                     nb_iface.mode = 'tagged'
                                     nb_iface.untagged_vlan = untagged_target_id
                                     nb_iface.tagged_vlans = list(target_tagged_set)
+                                    if cur_desc and not nb_iface.description:
+                                        nb_iface.description = cur_desc
+                                    if cur_lbl and not nb_iface.label:
+                                        nb_iface.label = cur_lbl
                                     nb_iface.save()
                                 elif target_mode == 'access':
                                     if cur_mode == 'tagged' and cur_tagged_set:
                                         nb_iface.mode = 'tagged'
                                         nb_iface.tagged_vlans = []
+                                        if cur_desc and not nb_iface.description:
+                                            nb_iface.description = cur_desc
+                                        if cur_lbl and not nb_iface.label:
+                                            nb_iface.label = cur_lbl
                                         nb_iface.save()
                                     nb_iface.mode = 'access'
                                     nb_iface.untagged_vlan = untagged_target_id
+                                    if cur_desc and not nb_iface.description:
+                                        nb_iface.description = cur_desc
+                                    if cur_lbl and not nb_iface.label:
+                                        nb_iface.label = cur_lbl
                                     nb_iface.save()
                                 else:
                                     if cur_mode == 'tagged' and cur_tagged_set:
                                         nb_iface.mode = 'tagged'
                                         nb_iface.tagged_vlans = []
+                                        if cur_desc and not nb_iface.description:
+                                            nb_iface.description = cur_desc
+                                        if cur_lbl and not nb_iface.label:
+                                            nb_iface.label = cur_lbl
                                         nb_iface.save()
                                     nb_iface.mode = None
                                     nb_iface.untagged_vlan = None
+                                    if cur_desc and not nb_iface.description:
+                                        nb_iface.description = cur_desc
+                                    if cur_lbl and not nb_iface.label:
+                                        nb_iface.label = cur_lbl
                                     nb_iface.save()
                             except Exception as tag_err:
                                 print(f"[!] Aviso ao salvar VLANs em {nb_iface.name}: {tag_err}")

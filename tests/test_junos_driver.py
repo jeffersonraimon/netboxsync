@@ -119,10 +119,10 @@ PIC port information:
     assert 'xe-0/1/0' in ifnames
     assert 'ae0' in ifnames
 
-    # 5. Interface VLANs
-    assert 100 in parsed['interface_vlans']['ge-0/0/1']
-    assert 200 in parsed['interface_vlans']['xe-0/1/0']
-    assert 100 in parsed['interface_vlans']['ae0']
+    # 5. Interface VLANs (Untagged & Tagged vinculadas à subinterface unit.0)
+    assert parsed['interface_untagged_vlans']['ge-0/0/1.0'] == 100
+    assert 200 in parsed['interface_vlans']['xe-0/1/0.0']
+    assert 100 in parsed['interface_vlans']['ae0.0']
 
     # 6. L3 Interfaces & IPs
     l3_names = [l3['name'] for l3 in parsed['interfaces_l3']]
@@ -148,3 +148,75 @@ PIC port information:
     assert parsed['lldp_neighbors'][0]['local_interface'] == 'xe-0/1/0'
     assert parsed['lldp_neighbors'][0]['remote_device'] == 'REMOTE-SW-02'
     assert parsed['lldp_neighbors'][0]['remote_interface'] == 'Ethernet1/1'
+
+
+def test_junos_lldp_with_trailing_prompt():
+    raw_lldp = """{
+    "lldp-neighbors-information" : [
+    {
+        "lldp-neighbor-information" : [
+        {
+            "lldp-local-port-id" : [ { "data" : "xe-0/0/39" } ],
+            "lldp-remote-system-name" : [ { "data" : "DM-4370-XXXXXX" } ],
+            "lldp-remote-port-description" : [ { "data" : "ten-gigabit-ethernet-1/1/2" } ]
+        }
+        ]
+    }
+    ]
+}
+
+{master:0}
+user@QFX-01-SAM>"""
+
+    driver = JuniperJunosDriver()
+    neighbors = driver._parse_lldp(raw_lldp)
+    assert len(neighbors) == 1
+    assert neighbors[0]['local_interface'] == 'xe-0/0/39'
+    assert neighbors[0]['remote_device'] == 'DM-4370-XXXXXX'
+    assert neighbors[0]['remote_interface'] == 'ten-gigabit-ethernet-1/1/2'
+
+
+def test_junos_inventory_pic_slot_0():
+    raw_chassis = """
+Hardware inventory:
+Item             Version  Part number  Serial number     Description
+Chassis                                JN1234567890      QFX5100-48S-6Q
+     Xcvr 49      REV 01   740-058732   30JXXXX15190     QSFP-100G-LR4
+     Xcvr 50      REV 01   740-061405   INKAZ3XXX41      QSFP-100G-SR4
+"""
+
+    raw_optics_diag = """
+Physical interface: et-0/0/49
+Physical interface: et-0/0/50
+"""
+
+    raw_pic_optics_0 = """
+FPC slot 0, PIC slot 0 information:
+  Type                             48x10G-4x100G
+  State                            Online
+
+PIC port information:
+                         Fiber                    Xcvr vendor       Wave-    Xcvr
+  Port Cable type        type  Xcvr vendor        part number       length   Firmware
+  49   100GBASE LR4      n/a   XXX                OPT8XXXX0D       1310 nm  0.0
+  50   100GBASE SR4      n/a   XXXXXXXXXXX        PRE-QSFP28-SR4    850 nm   0.0
+"""
+
+    driver = JuniperJunosDriver()
+    items = driver._parse_inventory(raw_chassis, raw_pic_optics_0, raw_optics_diag)
+
+    assert len(items) == 2
+
+    # Transceiver 49
+    assert items[0]['interface'] == 'et-0/0/49'
+    assert items[0]['manufacturer'] == 'XXX'
+    assert items[0]['part_id'] == 'OPT8XXXX0D'
+    assert items[0]['serial'] == '3XXXXX00715190'
+
+    # Transceiver 50
+    assert items[1]['interface'] == 'et-0/0/50'
+    assert items[1]['manufacturer'] == 'XXXXXXXX'
+    assert items[1]['part_id'] == 'PRE-QSFP28-SR4'
+    assert items[1]['serial'] == 'INKXXXXX841'
+
+
