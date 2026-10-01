@@ -251,8 +251,30 @@ set interfaces ae4 unit 1104 description "TEST VOAFIBRA 1104"
     et_3500 = next((i for i in data["interfaces_l3"] if i["name"] == "et-0/1/5.3500"), None)
     assert et_3500 is not None
     assert et_3500["vdc"] == "RT-AAA-01-LS3"
+def test_junos_deactivated_items():
+    raw_config = """
+set system host-name RT-AAAA-01
+set interfaces ae4 unit 83 description AAAAAAAAAAA
+set interfaces ae4 unit 83 vlan-id 83
+set interfaces ae4 unit 83 family inet address 192.168.0.29/30
+set interfaces ae4 unit 83 family inet6 address 2804:88c:2:30::1/64
+deactivate interfaces ae4 unit 83
 
+set interfaces ae4 unit 2514 description GF-WEB-271063
+set interfaces ae4 unit 2514 vlan-id 2514
+set interfaces ae4 unit 2514 family inet address 192.168.0.125/30
+set interfaces ae4 unit 2514 family inet address 192.168.0.29/30
+set interfaces ae4 unit 2514 family inet6 address 2804:88c:0:9::1/64
+"""
+    driver = JuniperJunosDriver()
+    data = driver.parse_data({"config": raw_config})
 
+    # ae4.83 desativado deve ser ignorado
+    assert not any(i["name"] == "ae4.83" for i in data["interfaces_l3"])
+    assert not any(ip["interface"] == "ae4.83" for ip in data["ips"])
 
+    # ae4.2514 ativo deve ser parseado normalmente
+    assert any(i["name"] == "ae4.2514" for i in data["interfaces_l3"])
+    assert any(ip["interface"] == "ae4.2514" and ip["address"] == "192.168.0.29/30" for ip in data["ips"])
 
 

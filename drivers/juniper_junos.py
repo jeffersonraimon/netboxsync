@@ -118,16 +118,36 @@ class JuniperJunosDriver(BaseDeviceDriver):
         chassis_raw = raw_outputs.get("chassis_hardware", "")
         lldp_raw = raw_outputs.get("lldp_json", "")
 
+        # Extrai os itens desativados (`deactivate ...`) para ignorá-los no parsing
+        deactivated_ifaces, deactivated_lines = self._parse_deactivated(config_raw)
+        
+        # Filtra linhas desativadas da configuração bruta
+        config_lines_active = []
+        for line in config_raw.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("deactivate "):
+                continue
+            if line_str in deactivated_lines:
+                continue
+            config_lines_active.append(line)
+        config_raw_active = "\n".join(config_lines_active)
+
         # 1. Hostname & Version & Model
-        hostname = self._parse_hostname(config_raw, version_raw)
+        hostname = self._parse_hostname(config_raw_active, version_raw)
         model = self._parse_model(version_raw, chassis_raw)
         serial = self._parse_serial(chassis_raw)
 
+
         # 2. Extract Data Structures
-        logical_systems = self._parse_logical_systems(config_raw)
-        vlans = self._parse_vlans(config_raw)
-        lags, lag_members = self._parse_lags(config_raw)
-        physical_ifaces, l3_units, interface_vlans, interface_untagged_vlans = self._parse_interfaces(config_raw, lag_members)
+        logical_systems = self._parse_logical_systems(config_raw_active)
+        vlans = self._parse_vlans(config_raw_active)
+        lags, lag_members = self._parse_lags(config_raw_active)
+        physical_ifaces, l3_units, interface_vlans, interface_untagged_vlans = self._parse_interfaces(config_raw_active, lag_members)
+
+        # Filtra interfaces fisicas e subinterfaces desativadas
+        physical_ifaces = [i for i in physical_ifaces if i['name'] not in deactivated_ifaces]
+        l3_units = [i for i in l3_units if i['name'] not in deactivated_ifaces]
+
         
         # Atribui VDCs às interfaces associadas aos logical-systems
         if logical_systems:
@@ -155,7 +175,9 @@ class JuniperJunosDriver(BaseDeviceDriver):
                     item['vdc'] = iface_to_ls[item['name']]
 
 
-        ips = self._parse_ips(config_raw)
+        ips = self._parse_ips(config_raw_active)
+        ips = [ip for ip in ips if ip['interface'] not in deactivated_ifaces]
+
         pic_optics_raw = raw_outputs.get("pic_optics", "")
         optics_diag_raw = raw_outputs.get("optics_diag", "")
         inventory_items = self._parse_inventory(chassis_raw, pic_optics_raw, optics_diag_raw)
@@ -184,7 +206,45 @@ class JuniperJunosDriver(BaseDeviceDriver):
             'vpn_tunnels': []
         }
 
+    def _parse_deactivated(self, config_raw: str) -> tuple[Set[str], Set[str]]:
+        """
+        Analisa linhas do tipo 'deactivate ...' e retorna o conjunto de interfaces desativadas
+        e o conjunto de comandos 'set ...' desativados correspondentes.
+        Ex:
+          deactivate interfaces ae4 unit 83
+          -> desativa "ae4.83" e ignora todas as linhas "set interfaces ae4 unit 83 ..."
+          deactivate system login user xxxxxx
+          -> ignora todas as linhas "set system login user xxxxxx ..."
+        """
+        deactivated_ifaces = set()
+        deactivated_lines = set()
+
+        for line in config_raw.splitlines():
+            line = line.strip()
+            if line.startswith("deactivate "):
+                # Converte 'deactivate <path>' em prefixo 'set <path>'
+                stmt_path = line[len("deactivate "):].strip()
+                target_set_prefix = f"set {stmt_path}"
+
+                # Mapeia interfaces/subinterfaces desativadas
+                m_if = re.search(r'^interfaces\s+(\S+)(?:\s+unit\s+(\d+))?', stmt_path) or \
+                       re.search(r'^logical-systems\s+\S+\s+interfaces\s+(\S+)(?:\s+unit\s+(\d+))?', stmt_path)
+                if m_if:
+                    base_if = m_if.group(1)
+                    unit_id = m_if.group(2)
+                    if_name = f"{base_if}.{unit_id}" if unit_id else base_if
+                    deactivated_ifaces.add(if_name)
+
+                # Coleta todas as linhas 'set ...' correspondentes para desativá-las
+                for conf_line in config_raw.splitlines():
+                    conf_str = conf_line.strip()
+                    if conf_str.startswith(target_set_prefix):
+                        deactivated_lines.add(conf_str)
+
+        return deactivated_ifaces, deactivated_lines
+
     def _parse_logical_systems(self, config_raw: str) -> Dict[str, List[str]]:
+
         """
         Extrai os Logical Systems e suas interfaces associadas.
         Ex: set logical-systems LS-VOAFIBRA_267388 interfaces ae4 unit 1103

@@ -908,13 +908,21 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     print(f"[!] Aviso ao criar/atualizar IP {ip_info['address']} (Interface: {iface_target.name}): {ip_err}")
                     continue
 
-                # Se for a interface loopback-0 (ou loopback 0), guarda o ID do IP para marcar como primario do dispositivo
-                if 'loopback' in ip_info['interface'].lower():
+                # Se for a interface lo0.0 (ou lo0 / loopback0), guarda o ID do IP para marcar como primario do dispositivo
+                if_lower = ip_info['interface'].lower()
+                if if_lower in ('lo0.0', 'lo0', 'lo0.0.0', 'loopback0.0', 'loopback0', 'lo.0'):
                     ip_id = getattr(ip_obj, 'id', getattr(ip_obj, 'pk', None))
                     if ip_info['address'].find(':') != -1:
                         primary_ip6_id = ip_id
                     else:
                         primary_ip4_id = ip_id
+                elif 'loopback' in if_lower or 'lo0' in if_lower:
+                    ip_id = getattr(ip_obj, 'id', getattr(ip_obj, 'pk', None))
+                    if ip_info['address'].find(':') != -1 and not primary_ip6_id:
+                        primary_ip6_id = ip_id
+                    elif ip_info['address'].find(':') == -1 and not primary_ip4_id:
+                        primary_ip4_id = ip_id
+
 
         # Atribui os IPs primarios (v4/v6) ao equipamento no NetBox
         if primary_ip4_id or primary_ip6_id:
