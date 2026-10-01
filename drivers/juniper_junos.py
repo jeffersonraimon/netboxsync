@@ -275,7 +275,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
         name_lower = if_name.lower()
         if re.match(r'^ae\d+', name_lower) or any(k in name_lower for k in ['lag', 'port-channel', 'aggregate', 'bond']):
             return 'lag'
-        if any(k in name_lower for k in ['l3-', 'loopback', 'vlan', 'vlan-interface', 've', 'bdi', 'tunnel', 'virtual', 'lo', 'irb']):
+        if name_lower.startswith(('lt-', 'gr-')) or any(k in name_lower for k in ['l3-', 'loopback', 'vlan', 'vlan-interface', 've', 'bdi', 'tunnel', 'virtual', 'lo', 'irb', 'lt-', 'gr-']):
             return 'virtual'
         if 'et-' in name_lower or '100g' in name_lower:
             return '100gbase-x-qsfp28'

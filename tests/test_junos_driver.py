@@ -278,3 +278,13 @@ set interfaces ae4 unit 2514 family inet6 address 2804:88c:0:9::1/64
     assert any(ip["interface"] == "ae4.2514" and ip["address"] == "192.168.0.29/30" for ip in data["ips"])
 
 
+def test_junos_normalize_virtual_interfaces():
+    driver = JuniperJunosDriver()
+    assert driver.normalize_interface_type("lt-0/0/0") == "virtual"
+    assert driver.normalize_interface_type("lt-0/0/0.0") == "virtual"
+    assert driver.normalize_interface_type("lt-0/0/0.1") == "virtual"
+    assert driver.normalize_interface_type("gr-0/0/0") == "virtual"
+    assert driver.normalize_interface_type("gr-0/0/0.0") == "virtual"
+
+
+
