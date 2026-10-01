@@ -616,10 +616,12 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 print(f"[!] Aviso ao salvar VLAN na interface L3 {nb_iface.name}: {l3_save_err}")
                     else:
                         cur_mode_raw = getattr(nb_iface, 'mode', None)
-                        cur_mode = getattr(cur_mode_raw, 'value', str(cur_mode_raw or '')).lower()
+                        cur_mode_val = getattr(cur_mode_raw, 'value', cur_mode_raw)
+                        cur_mode = cur_mode_val.lower() if cur_mode_val else None
                         
                         cur_untagged_raw = getattr(nb_iface, 'untagged_vlan', None)
                         cur_untagged_id = getattr(cur_untagged_raw, 'id', getattr(cur_untagged_raw, 'pk', cur_untagged_raw))
+                        cur_untagged_id = int(cur_untagged_id) if cur_untagged_id is not None and str(cur_untagged_id).isdigit() else None
 
                         raw_tagged = getattr(nb_iface, 'tagged_vlans', []) or []
                         cur_tagged = []
