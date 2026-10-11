@@ -156,24 +156,46 @@ def get_interface_cable_peer(nb, iface_obj):
     return None, cable_obj
 
 
-def delete_netbox_cable(nb, cable_obj):
+def delete_netbox_cable(nb, cable_obj, deleted_cable_ids=None):
     """
-    Remove um cabo do NetBox com segurança.
+    Remove um cabo do NetBox com segurança, evitando erros se o cabo já tiver sido deletado
+    (por exemplo, quando uma porta ponta-a-ponta remove o mesmo cabo compartilhado).
     """
     if not cable_obj:
         return False
     cable_id = getattr(cable_obj, 'id', getattr(cable_obj, 'pk', None))
+    if deleted_cable_ids is not None and cable_id and cable_id in deleted_cable_ids:
+        return True
     try:
         if hasattr(cable_obj, 'delete'):
-            return cable_obj.delete()
+            res = cable_obj.delete()
+            if deleted_cable_ids is not None and cable_id:
+                deleted_cable_ids.add(cable_id)
+            return res
         elif cable_id and hasattr(nb.dcim, 'cables'):
-            return nb.dcim.cables.delete([cable_id])
+            res = nb.dcim.cables.delete([cable_id])
+            if deleted_cable_ids is not None and cable_id:
+                deleted_cable_ids.add(cable_id)
+            return res
     except Exception as err:
+        err_msg = str(err)
+        # Se o cabo já não existir mais no NetBox (404), trata como sucesso
+        if 'could not be found' in err_msg or '404' in err_msg or 'Not Found' in err_msg:
+            if deleted_cable_ids is not None and cable_id:
+                deleted_cable_ids.add(cable_id)
+            return True
         try:
             if cable_id and hasattr(nb.dcim, 'cables'):
-                return nb.dcim.cables.delete([cable_id])
-        except Exception:
-            pass
+                res = nb.dcim.cables.delete([cable_id])
+                if deleted_cable_ids is not None and cable_id:
+                    deleted_cable_ids.add(cable_id)
+                return res
+        except Exception as fallback_err:
+            fb_msg = str(fallback_err)
+            if 'could not be found' in fb_msg or '404' in fb_msg or 'Not Found' in fb_msg:
+                if deleted_cable_ids is not None and cable_id:
+                    deleted_cable_ids.add(cable_id)
+                return True
     return False
 
 
@@ -1373,6 +1395,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
         cable_endpoint = getattr(nb.dcim, 'cables', None)
         if cable_endpoint:
             created_cables_loc_ids = set()
+            deleted_cable_ids = set()
 
             # 8.1 Processar vizinhos LLDP
             for lldp in data.get('lldp_neighbors', []):
@@ -1418,7 +1441,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     # Topologia mudou na interface local!
                     loc_peer_name = f"{getattr(getattr(loc_peer, 'device', None), 'name', 'Desconhecido')} {abbreviate_ifname(getattr(loc_peer, 'name', ''))}" if loc_peer else "Desconhecido"
                     print(f"[↻] Topologia alterada na interface local '{loc_iface.name}' ({hostname}): cabo anterior ({loc_peer_name}) desatualizado. Removendo cabo antigo...")
-                    delete_netbox_cable(nb, loc_cable)
+                    delete_netbox_cable(nb, loc_cable, deleted_cable_ids)
                     loc_iface.cable = None
 
                 # Verificar se a interface remota possui cabo conectado a outro destino
@@ -1433,7 +1456,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
                     rem_peer_name = f"{getattr(getattr(rem_peer, 'device', None), 'name', 'Desconhecido')} {abbreviate_ifname(getattr(rem_peer, 'name', ''))}" if rem_peer else "Desconhecido"
                     print(f"[↻] Topologia alterada na interface remota '{rem_iface.name}' ({rem_dev.name}): estava conectada em {rem_peer_name}. Removendo cabo antigo para reatribuição...")
-                    delete_netbox_cable(nb, rem_cable)
+                    delete_netbox_cable(nb, rem_cable, deleted_cable_ids)
                     rem_iface.cable = None
 
                 cable_type = 'smf' if ('hundred' in loc_if_name or 'ten' in loc_if_name or 'twenty' in loc_if_name) else 'cat6'
