@@ -138,6 +138,27 @@ class DatacomDmOSDriver(BaseDeviceDriver):
             platform_text = platform_text.replace('\r\n', '\n').replace('\r', '\n')
         if lldp_text:
             lldp_text = lldp_text.replace('\r\n', '\n').replace('\r', '\n')
+            # Corrige quebras de linha em saídas tabulares onde o system-name continua na linha seguinte
+            # Ex: "DM4270-AAAAAAAA" seguido de "\n                                          -BBBBBBB"
+            merged_lldp_lines = []
+            for l_line in lldp_text.splitlines():
+                if not l_line.strip():
+                    continue
+                if re.match(r'^\s{4,}\S', l_line) and not re.search(r'^\s*(?:[a-z0-9\-]+-ethernet|mgmt|lag|eth|gi|te|hu)[\s\-][\d\/]+', l_line, re.I):
+                    cont = l_line.strip()
+                    if merged_lldp_lines:
+                        prev = merged_lldp_lines[-1]
+                        parts = [p.strip() for p in re.split(r'\s{2,}', prev.strip()) if p.strip()]
+                        if len(parts) >= 5:
+                            parts[4] = parts[4] + cont
+                            merged_lldp_lines[-1] = '    '.join(parts)
+                            continue
+                        elif len(parts) >= 2:
+                            parts[-1] = parts[-1] + cont
+                            merged_lldp_lines[-1] = '    '.join(parts)
+                            continue
+                merged_lldp_lines.append(l_line)
+            lldp_text = '\n'.join(merged_lldp_lines)
 
         data = {
             'hostname': None,
@@ -286,7 +307,14 @@ class DatacomDmOSDriver(BaseDeviceDriver):
         if json_payload and (json_payload.get('lldp') or json_payload.get('lldp_json')):
             raw_lldp_json = json_payload.get('lldp') or json_payload.get('lldp_json')
             try:
-                lldp_struct = json.loads(raw_lldp_json) if isinstance(raw_lldp_json, str) else raw_lldp_json
+                lldp_struct = None
+                if isinstance(raw_lldp_json, dict) or isinstance(raw_lldp_json, list):
+                    lldp_struct = raw_lldp_json
+                elif isinstance(raw_lldp_json, str):
+                    try:
+                        lldp_struct = json.loads(raw_lldp_json)
+                    except Exception:
+                        lldp_struct = fix_dmos_json(raw_lldp_json)
                 def _extract_json_lldp(obj):
                     if isinstance(obj, dict):
                         loc_if = obj.get('local-interface') or obj.get('name') or obj.get('local_interface')
