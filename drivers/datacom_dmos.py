@@ -428,7 +428,9 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                     vlans.append(int(part))
             return vlans
 
-        def add_iface_vlan(iface_name, vlan_id):
+        data['interface_vlan_names'] = {}
+
+        def add_iface_vlan(iface_name, vlan_id, vname=None):
             if not iface_name:
                 return
             iface_formatted = iface_name.replace("ten-gigabit-ethernet ", "ten-gigabit-ethernet-") \
@@ -438,8 +440,12 @@ class DatacomDmOSDriver(BaseDeviceDriver):
             if iface_formatted not in data['interface_vlans']:
                 data['interface_vlans'][iface_formatted] = set()
             data['interface_vlans'][iface_formatted].add(int(vlan_id))
+            if vname:
+                if iface_formatted not in data['interface_vlan_names']:
+                    data['interface_vlan_names'][iface_formatted] = {}
+                data['interface_vlan_names'][iface_formatted][int(vlan_id)] = vname
 
-        def add_iface_untagged_vlan(iface_name, vlan_id):
+        def add_iface_untagged_vlan(iface_name, vlan_id, vname=None):
             if not iface_name:
                 return
             iface_formatted = iface_name.replace("ten-gigabit-ethernet ", "ten-gigabit-ethernet-") \
@@ -447,6 +453,10 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                                         .replace("gigabit-ethernet ", "gigabit-ethernet-") \
                                         .replace("lag ", "lag-")
             data['interface_untagged_vlans'][iface_formatted] = int(vlan_id)
+            if vname:
+                if iface_formatted not in data['interface_vlan_names']:
+                    data['interface_vlan_names'][iface_formatted] = {}
+                data['interface_vlan_names'][iface_formatted][int(vlan_id)] = vname
 
         # 4. VLANs nativas e tagged do bloco dot1q
         vlan_block = re.search(r'dot1q\n(.*?)(?=\n!\n|\n[a-z]|\Z)', config_text, re.DOTALL)
@@ -467,9 +477,9 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                     is_untagged = 'untagged' in iface_sub.lower()
                     for vid in vids:
                         if is_untagged:
-                            add_iface_untagged_vlan(iface_item, vid)
+                            add_iface_untagged_vlan(iface_item, vid, vname=vname)
                         else:
-                            add_iface_vlan(iface_item, vid)
+                            add_iface_vlan(iface_item, vid, vname=vname)
 
         # 4.1. Bloco switchport (native-vlan)
         switchport_block = re.search(r'switchport\n(.*?)(?=\n!\n|\n[a-z]|\Z)', config_text, re.DOTALL)
@@ -584,9 +594,9 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                         vlan_vid = None
 
                     if iface_name and vlan_vid:
-                        add_iface_vlan(iface_name, vlan_vid)
-                        if vlan_vid not in data['vlans']:
-                            data['vlans'][vlan_vid] = f"VLAN-{vlan_vid}-{entry_name}"
+                        add_iface_vlan(iface_name, vlan_vid, vname=entry_name)
+                        if vlan_vid not in data['vlans'] or data['vlans'][vlan_vid] == f"VLAN-{vlan_vid}":
+                            data['vlans'][vlan_vid] = entry_name or f"VLAN-{vlan_vid}-{entry_name}"
 
                     if vlan_vid:
                         vlan_roles_map[vlan_vid] = "VPWS-TUNEIS"
@@ -620,16 +630,17 @@ class DatacomDmOSDriver(BaseDeviceDriver):
                     re.findall(r'^[ \t]*access-interface\s+([\w\-\.\/]+)', block, re.MULTILINE)))
                 for iface in access_ifaces:
                     if vlan_vid:
-                        add_iface_vlan(iface, vlan_vid)
+                        add_iface_vlan(iface, vlan_vid, vname=entry_name)
 
                 if vlan_vid:
-                    if vlan_vid not in data['vlans']:
-                        data['vlans'][vlan_vid] = f"VLAN-{vlan_vid}-{entry_name}"
+                    if vlan_vid not in data['vlans'] or data['vlans'][vlan_vid] == f"VLAN-{vlan_vid}":
+                        data['vlans'][vlan_vid] = entry_name or f"VLAN-{vlan_vid}-{entry_name}"
                     vlan_roles_map[vlan_vid] = "VPLS-TUNEIS"
 
                 for cvid in customer_vlans:
-                    if cvid not in data['vlans']:
-                        data['vlans'][cvid] = f"VLAN-{cvid}-Customer-{entry_name}"
+                    cv_name = f"{entry_name}-Customer-{cvid}" if entry_name else f"VLAN-{cvid}"
+                    if cvid not in data['vlans'] or data['vlans'][cvid] == f"VLAN-{cvid}":
+                        data['vlans'][cvid] = cv_name
                     vlan_roles_map[cvid] = "VPLS-TUNEIS"
 
                 neighbors = re.findall(r'^[ \t]*neighbor\s+([\d\.]+).*?^[ \t]*pw-id\s+(\d+)', block, re.DOTALL | re.MULTILINE)
@@ -721,10 +732,10 @@ class DatacomDmOSDriver(BaseDeviceDriver):
             iface_name = f"l3-{l3_name}"
             if lower_vlan:
                 vvid = int(lower_vlan.group(1))
-                vlan_roles_map[vvid] = "PTP-EQUIPAMENTOS"
-                add_iface_vlan(iface_name, vvid)
-                if vvid not in data['vlans']:
-                    data['vlans'][vvid] = f"VLAN-{vvid}-PTP-{l3_name}"
+                ptp_vname = f"PTP-{l3_name}"
+                add_iface_vlan(iface_name, vvid, vname=ptp_vname)
+                if vvid not in data['vlans'] or data['vlans'][vvid] == f"VLAN-{vvid}":
+                    data['vlans'][vvid] = ptp_vname
 
             data['interfaces_l3'].append({
                 'name': iface_name,

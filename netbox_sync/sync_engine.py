@@ -152,7 +152,7 @@ def find_netbox_vlan(nb, vid, vname=None, site_id=None, group_id=None, preferred
     if len(candidates) == 1:
         return candidates[0]
 
-    # 1. Correspondência por nome da VLAN (ex: 'SDSDSDSD-v667' vs 'SAAAAAAAAAAA-v667')
+    # 1. Correspondência por nome da VLAN (ex: 'AAAAAAA-v667' vs 'BBBBBBBBBBBBBBB')
     if vname:
         vname_clean = str(vname).strip()
         # 1.1 Match exato
@@ -170,6 +170,47 @@ def find_netbox_vlan(nb, vid, vname=None, site_id=None, group_id=None, preferred
             norm_c = c.name.lower().replace(" ", "-").replace("_", "-")
             if norm_c == norm_vname:
                 return c
+
+        # 1.4 Match desconsiderando prefixos gerados por scripts/drivers (ex: 'vlan-667-DSADSDAS-v667' vs 'DSADSDAS-v667')
+        stripped_vname = re.sub(rf'^vlan[\-_]?{vid}[\-_]?', '', norm_vname, flags=re.IGNORECASE)
+        stripped_vname = re.sub(r'^vlan[\-_]?', '', stripped_vname, flags=re.IGNORECASE).strip('-_')
+        if stripped_vname:
+            for c in candidates:
+                norm_c = c.name.lower().replace(" ", "-").replace("_", "-")
+                stripped_c = re.sub(rf'^vlan[\-_]?{vid}[\-_]?', '', norm_c, flags=re.IGNORECASE)
+                stripped_c = re.sub(r'^vlan[\-_]?', '', stripped_c, flags=re.IGNORECASE).strip('-_')
+                if stripped_c == stripped_vname:
+                    return c
+
+        # 1.5 Match por sobreposição de tokens ou substrings significativas
+        def get_tokens(s):
+            toks = set(re.findall(r'[a-zA-Z0-9]+', s.lower()))
+            toks.discard('vlan')
+            toks.discard('customer')
+            toks.discard('ptp')
+            toks.discard(str(vid))
+            return toks
+
+        target_tokens = get_tokens(vname_clean)
+        best_candidate = None
+        best_score = 0
+        for c in candidates:
+            norm_c = c.name.lower().replace(" ", "-").replace("_", "-")
+            stripped_c = re.sub(rf'^vlan[\-_]?{vid}[\-_]?', '', norm_c, flags=re.IGNORECASE).strip('-_')
+            score = 0
+            if stripped_vname and stripped_c and (stripped_c in stripped_vname or stripped_vname in stripped_c):
+                score = min(len(stripped_c), len(stripped_vname)) + 100
+            else:
+                c_tokens = get_tokens(c.name)
+                overlap = target_tokens.intersection(c_tokens)
+                if overlap:
+                    score = len(overlap) * 10
+            if score > best_score:
+                best_score = score
+                best_candidate = c
+
+        if best_candidate and best_score > 0:
+            return best_candidate
 
     # 2. Correspondência por Site do equipamento
     if site_id:
@@ -740,9 +781,18 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     # 1. Resolve VLAN untagged no NetBox se informada
                     untagged_target_id = None
                     if untagged_vid:
-                        u_obj = nb_vlans.get(untagged_vid)
+                        iface_u_name = (
+                            data.get('interface_vlan_names', {}).get(if_name, {}).get(untagged_vid)
+                            or data.get('interface_vlan_names', {}).get(if_name.replace(" ", "-"), {}).get(untagged_vid)
+                            or data.get('interface_vlan_names', {}).get(if_name.replace("-", " "), {}).get(untagged_vid)
+                        )
+                        vname = iface_u_name or data['vlans'].get(untagged_vid, f"VLAN-{untagged_vid}")
+                        u_obj = None
+                        if iface_u_name:
+                            u_obj = find_netbox_vlan(nb, untagged_vid, vname=iface_u_name, site_id=site_id)
                         if not u_obj:
-                            vname = data['vlans'].get(untagged_vid, f"VLAN-{untagged_vid}")
+                            u_obj = nb_vlans.get(untagged_vid)
+                        if not u_obj:
                             u_obj = find_netbox_vlan(nb, untagged_vid, vname=vname, site_id=site_id)
 
                         if not u_obj:
@@ -768,9 +818,18 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     vlan_target_ids = []
                     if vlan_ids:
                         for v in vlan_ids:
-                            v_obj = nb_vlans.get(v)
+                            iface_t_name = (
+                                data.get('interface_vlan_names', {}).get(if_name, {}).get(v)
+                                or data.get('interface_vlan_names', {}).get(if_name.replace(" ", "-"), {}).get(v)
+                                or data.get('interface_vlan_names', {}).get(if_name.replace("-", " "), {}).get(v)
+                            )
+                            vname = iface_t_name or data['vlans'].get(v, f"VLAN-{v}")
+                            v_obj = None
+                            if iface_t_name:
+                                v_obj = find_netbox_vlan(nb, v, vname=iface_t_name, site_id=site_id)
                             if not v_obj:
-                                vname = data['vlans'].get(v, f"VLAN-{v}")
+                                v_obj = nb_vlans.get(v)
+                            if not v_obj:
                                 v_obj = find_netbox_vlan(nb, v, vname=vname, site_id=site_id)
 
                             if not v_obj:
