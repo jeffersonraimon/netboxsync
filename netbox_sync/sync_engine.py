@@ -126,6 +126,72 @@ def find_netbox_interface(nb, dev_id, if_name):
         if norm_target in iface.name.replace(" ", "-").lower() or iface.name.replace(" ", "-").lower() in norm_target:
             return iface
 
+    return None
+
+
+def find_netbox_vlan(nb, vid, vname=None, site_id=None, group_id=None, preferred_role=None):
+    """
+    Busca uma VLAN no NetBox de forma precisa quando existem múltiplas VLANs com o mesmo VID.
+    Prioridades de desempate:
+    1. Nome exato ou compatível (case-insensitive ou normalizado)
+    2. Pertencente ao mesmo Site
+    3. Pertencente ao mesmo Grupo de VLAN
+    4. VLAN Global (sem site e sem grupo)
+    """
+    if not vid:
+        return None
+
+    try:
+        candidates = list(nb.ipam.vlans.filter(vid=vid))
+    except Exception:
+        candidates = []
+
+    if not candidates:
+        return None
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # 1. Correspondência por nome da VLAN (ex: 'SDSDSDSD-v667' vs 'SAAAAAAAAAAA-v667')
+    if vname:
+        vname_clean = str(vname).strip()
+        # 1.1 Match exato
+        for c in candidates:
+            if c.name == vname_clean:
+                return c
+        # 1.2 Match case-insensitive
+        vname_lower = vname_clean.lower()
+        for c in candidates:
+            if c.name.lower() == vname_lower:
+                return c
+        # 1.3 Match com normalização de traços e espaços
+        norm_vname = vname_lower.replace(" ", "-").replace("_", "-")
+        for c in candidates:
+            norm_c = c.name.lower().replace(" ", "-").replace("_", "-")
+            if norm_c == norm_vname:
+                return c
+
+    # 2. Correspondência por Site do equipamento
+    if site_id:
+        for c in candidates:
+            c_site_id = getattr(getattr(c, 'site', None), 'id', None)
+            if c_site_id == site_id:
+                return c
+
+    # 3. Correspondência por Grupo de VLAN
+    if group_id:
+        for c in candidates:
+            c_group_id = getattr(getattr(c, 'group', None), 'id', None)
+            if c_group_id == group_id:
+                return c
+
+    # 4. VLAN Global (sem site e sem grupo)
+    globals_ = [c for c in candidates if not getattr(c, 'site', None) and not getattr(c, 'group', None)]
+    if globals_:
+        return globals_[0]
+
+    return candidates[0]
+
 def get_interface_cable_peer(nb, iface_obj):
     """
     Retorna o peer conectado na interface (interface remota do outro lado do cabo) e o objeto do cabo,
@@ -510,9 +576,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     if any(m in sync_modules for m in ['vlans', 'vlan']):
         vlan_roles_map = data.get('vlan_roles_map', {})
         for vid, vname in data['vlans'].items():
-            # Busca prioritariamente VLANs Globais (site_id='null') ou qualquer VLAN com o mesmo VID
-            vlans_found = list(nb.ipam.vlans.filter(vid=vid, site_id='null')) or list(nb.ipam.vlans.filter(vid=vid))
-            vlan = vlans_found[0] if vlans_found else None
+            # Busca a VLAN precisa considerando o nome configurado e o site do equipamento
+            vlan = find_netbox_vlan(nb, vid, vname=vname, site_id=site_id)
 
             target_role_name = vlan_roles_map.get(vid)
             target_role_id = vlan_roles_cache.get(target_role_name) if target_role_name else None
@@ -527,12 +592,12 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 need_save = False
                 # Se a VLAN existia em outro status (ex: deprecated), reativa para active
                 if getattr(vlan.status, 'value', str(vlan.status)).lower() != 'active':
-                    print(f"[➔] Reativando VLAN {vid} ({vname}) -> Status: Active")
+                    print(f"[➔] Reativando VLAN {vid} ({vlan.name}) -> Status: Active")
                     vlan.status = 'active'
                     need_save = True
 
                 if target_role_id and getattr(vlan.role, 'id', None) != target_role_id:
-                    print(f"[➔] Atribuindo Role '{target_role_name}' para a VLAN {vid} ({vname})")
+                    print(f"[➔] Atribuindo Role '{target_role_name}' para a VLAN {vid} ({vlan.name})")
                     vlan.role = target_role_id
                     need_save = True
 
@@ -541,10 +606,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
             nb_vlans[vid] = vlan
     else:
         # Preenche nb_vlans para módulos dependentes (ex: l2vpn) caso existam no NetBox
-        for vid in data['vlans'].keys():
-            vlans_found = list(nb.ipam.vlans.filter(vid=vid, site_id='null')) or list(nb.ipam.vlans.filter(vid=vid))
-            if vlans_found:
-                nb_vlans[vid] = vlans_found[0]
+        for vid, vname in data['vlans'].items():
+            vlan = find_netbox_vlan(nb, vid, vname=vname, site_id=site_id)
+            if vlan:
+                nb_vlans[vid] = vlan
 
     # Guarda os IDs dos IPs de Loopback para definir como IP primario do equipamento
     primary_ip4_id = None
@@ -677,8 +742,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     if untagged_vid:
                         u_obj = nb_vlans.get(untagged_vid)
                         if not u_obj:
-                            u_found = list(nb.ipam.vlans.filter(vid=untagged_vid, site_id='null')) or list(nb.ipam.vlans.filter(vid=untagged_vid))
-                            u_obj = u_found[0] if u_found else None
+                            vname = data['vlans'].get(untagged_vid, f"VLAN-{untagged_vid}")
+                            u_obj = find_netbox_vlan(nb, untagged_vid, vname=vname, site_id=site_id)
 
                         if not u_obj:
                             vname = data['vlans'].get(untagged_vid, f"VLAN-{untagged_vid}")
@@ -691,8 +756,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                     v_kwargs['role'] = target_role_id
                                 u_obj = nb.ipam.vlans.create(**v_kwargs)
                             except Exception:
-                                u_found = list(nb.ipam.vlans.filter(vid=untagged_vid, site_id='null')) or list(nb.ipam.vlans.filter(vid=untagged_vid))
-                                u_obj = u_found[0] if u_found else None
+                                u_obj = find_netbox_vlan(nb, untagged_vid, vname=vname, site_id=site_id)
 
                         if u_obj:
                             nb_vlans[untagged_vid] = u_obj
@@ -706,8 +770,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         for v in vlan_ids:
                             v_obj = nb_vlans.get(v)
                             if not v_obj:
-                                v_found = list(nb.ipam.vlans.filter(vid=v, site_id='null')) or list(nb.ipam.vlans.filter(vid=v))
-                                v_obj = v_found[0] if v_found else None
+                                vname = data['vlans'].get(v, f"VLAN-{v}")
+                                v_obj = find_netbox_vlan(nb, v, vname=vname, site_id=site_id)
 
                             if not v_obj:
                                 vname = data['vlans'].get(v, f"VLAN-{v}")
@@ -720,8 +784,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                         v_kwargs['role'] = target_role_id
                                     v_obj = nb.ipam.vlans.create(**v_kwargs)
                                 except Exception:
-                                    v_found = list(nb.ipam.vlans.filter(vid=v, site_id='null')) or list(nb.ipam.vlans.filter(vid=v))
-                                    v_obj = v_found[0] if v_found else None
+                                    v_obj = find_netbox_vlan(nb, v, vname=vname, site_id=site_id)
                             if v_obj:
                                 nb_vlans[v] = v_obj
                                 v_id = getattr(v_obj, 'id', getattr(v_obj, 'pk', None))
@@ -1252,21 +1315,28 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         if need_up:
                             l2vpn.save()
 
-                    if l2vpn_term_endpoint and vpws.get('vlan_id') and vpws['vlan_id'] in nb_vlans:
-                        vlan_obj = nb_vlans[vpws['vlan_id']]
-                        vlan_id = getattr(vlan_obj, 'id', getattr(vlan_obj, 'pk', None))
-                        l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
-                        terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
-                        if not terms_by_vlan:
-                            print(f"[+] Vinculando L2VPN VPWS '{name}' a VLAN {vpws['vlan_id']}")
-                            try:
-                                l2vpn_term_endpoint.create(
-                                    l2vpn=l2vpn_id,
-                                    assigned_object_type='ipam.vlan',
-                                    assigned_object_id=vlan_id
-                                )
-                            except Exception as term_err:
-                                print(f"[!] Aviso ao vincular L2VPN VPWS '{name}' a VLAN {vpws['vlan_id']}: {term_err}")
+                    target_vlan_id = vpws.get('vlan_id')
+                    if l2vpn_term_endpoint and target_vlan_id:
+                        vlan_obj = nb_vlans.get(target_vlan_id)
+                        if not vlan_obj or (name and vlan_obj.name.lower() != name.lower()):
+                            v_found = find_netbox_vlan(nb, target_vlan_id, vname=name, site_id=site_id)
+                            if v_found:
+                                vlan_obj = v_found
+
+                        if vlan_obj:
+                            vlan_id = getattr(vlan_obj, 'id', getattr(vlan_obj, 'pk', None))
+                            l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
+                            terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
+                            if not terms_by_vlan:
+                                print(f"[+] Vinculando L2VPN VPWS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
+                                try:
+                                    l2vpn_term_endpoint.create(
+                                        l2vpn=l2vpn_id,
+                                        assigned_object_type='ipam.vlan',
+                                        assigned_object_id=vlan_id
+                                    )
+                                except Exception as term_err:
+                                    print(f"[!] Aviso ao vincular L2VPN VPWS '{name}' a VLAN {target_vlan_id}: {term_err}")
 
                 for vpls in data['vpls']:
                     name = vpls['name']
@@ -1309,67 +1379,78 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         if need_up:
                             l2vpn.save()
 
-                    if vpls.get('vlan_id') and vpls['vlan_id'] in nb_vlans:
-                        vlan_obj = nb_vlans[vpls['vlan_id']]
-                        vlan_id = getattr(vlan_obj, 'id', getattr(vlan_obj, 'pk', None))
+                    target_vpls_vid = vpls.get('vlan_id')
+                    if target_vpls_vid:
+                        vlan_obj = nb_vlans.get(target_vpls_vid)
+                        if not vlan_obj or (name and vlan_obj.name.lower() != name.lower()):
+                            v_found = find_netbox_vlan(nb, target_vpls_vid, vname=name, site_id=site_id)
+                            if v_found:
+                                vlan_obj = v_found
 
-                        # Se o VPLS é QinQ, configura a VLAN de serviço (S-VLAN)
-                        if vpls.get('is_qinq') or vpls.get('customer_vlans'):
-                            cur_role = getattr(vlan_obj, 'qinq_role', None)
-                            cur_role_val = cur_role.value if hasattr(cur_role, 'value') else str(cur_role or '')
-                            if cur_role_val.lower() != 'svlan':
-                                print(f"[➔] Configurando VLAN {vpls['vlan_id']} como Q-in-Q Service (S-VLAN)")
-                                vlan_obj.qinq_role = 'svlan'
-                                vlan_obj.save()
+                        if vlan_obj:
+                            vlan_id = getattr(vlan_obj, 'id', getattr(vlan_obj, 'pk', None))
 
-                            # Carrega em cache as C-VLANs já vinculadas a esta S-VLAN no NetBox
-                            existing_cvlans_for_svlan = {}
-                            try:
-                                svlan_cvlan_list = list(nb.ipam.vlans.filter(qinq_svlan_id=vlan_id))
-                                for cv in svlan_cvlan_list:
-                                    existing_cvlans_for_svlan[cv.vid] = cv
-                            except Exception:
-                                pass
+                            # Se o VPLS é QinQ, configura a VLAN de serviço (S-VLAN)
+                            if vpls.get('is_qinq') or vpls.get('customer_vlans'):
+                                cur_role = getattr(vlan_obj, 'qinq_role', None)
+                                cur_role_val = cur_role.value if hasattr(cur_role, 'value') else str(cur_role or '')
+                                if cur_role_val.lower() != 'svlan':
+                                    print(f"[➔] Configurando VLAN {target_vpls_vid} ({vlan_obj.name}) como Q-in-Q Service (S-VLAN)")
+                                    vlan_obj.qinq_role = 'svlan'
+                                    vlan_obj.save()
 
-                            # Processa e associa as Customer VLANs (C-VLANs) a esta S-VLAN
-                            for cvid in vpls.get('customer_vlans', []):
-                                # 1. Se já existe uma C-VLAN com esse VID vinculada a esta S-VLAN, ela já está correta!
-                                if cvid in existing_cvlans_for_svlan:
-                                    continue
-
-                                # 2. Caso contrário, verifica se existe objeto em nb_vlans para configurar
-                                if cvid in nb_vlans:
-                                    cvlan_obj = nb_vlans[cvid]
-                                    cvlan_id = cvlan_obj.id if hasattr(cvlan_obj, 'id') else None
-                                    cur_role = getattr(cvlan_obj, 'qinq_role', None)
-                                    cur_role_val = cur_role.value if hasattr(cur_role, 'value') else cur_role
-                                    cur_svlan = getattr(cvlan_obj, 'qinq_svlan', None)
-                                    cur_svlan_id = getattr(cur_svlan, 'id', cur_svlan)
-
-                                    if cur_role_val != 'cvlan' or cur_svlan_id != vlan_id:
-                                        print(f"[➔] Configurando C-VLAN {cvid} (Role: Customer, SVLAN: {vpls['vlan_id']})")
-                                        try:
-                                            cvlan_obj.qinq_role = 'cvlan'
-                                            cvlan_obj.qinq_svlan = vlan_id
-                                            cvlan_obj.save()
-                                            existing_cvlans_for_svlan[cvid] = cvlan_obj
-                                        except Exception as err:
-                                            print(f"[!] Erro ao salvar C-VLAN {cvid}: {err}")
-
-                        # Vincula a Terminação L2VPN à Service VLAN se a VLAN ainda não estiver atribuída
-                        if l2vpn_term_endpoint:
-                            l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
-                            terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
-                            if not terms_by_vlan:
-                                print(f"[+] Vinculando L2VPN VPLS '{name}' a VLAN {vpls['vlan_id']}")
+                                # Carrega em cache as C-VLANs já vinculadas a esta S-VLAN no NetBox
+                                existing_cvlans_for_svlan = {}
                                 try:
-                                    l2vpn_term_endpoint.create(
-                                        l2vpn=l2vpn_id,
-                                        assigned_object_type='ipam.vlan',
-                                        assigned_object_id=vlan_id
-                                    )
-                                except Exception as term_err:
-                                    print(f"[!] Aviso ao vincular L2VPN VPLS '{name}' a VLAN {vpls['vlan_id']}: {term_err}")
+                                    svlan_cvlan_list = list(nb.ipam.vlans.filter(qinq_svlan_id=vlan_id))
+                                    for cv in svlan_cvlan_list:
+                                        existing_cvlans_for_svlan[cv.vid] = cv
+                                except Exception:
+                                    pass
+
+                                # Processa e associa as Customer VLANs (C-VLANs) a esta S-VLAN
+                                for cvid in vpls.get('customer_vlans', []):
+                                    # 1. Se já existe uma C-VLAN com esse VID vinculada a esta S-VLAN, ela já está correta!
+                                    if cvid in existing_cvlans_for_svlan:
+                                        continue
+
+                                    # 2. Caso contrário, verifica se existe objeto em nb_vlans para configurar
+                                    cvlan_obj = nb_vlans.get(cvid)
+                                    if not cvlan_obj:
+                                        cv_name = data.get('vlans', {}).get(cvid)
+                                        cvlan_obj = find_netbox_vlan(nb, cvid, vname=cv_name, site_id=site_id)
+
+                                    if cvlan_obj:
+                                        cvlan_id = getattr(cvlan_obj, 'id', getattr(cvlan_obj, 'pk', None))
+                                        cur_role = getattr(cvlan_obj, 'qinq_role', None)
+                                        cur_role_val = cur_role.value if hasattr(cur_role, 'value') else cur_role
+                                        cur_svlan = getattr(cvlan_obj, 'qinq_svlan', None)
+                                        cur_svlan_id = getattr(cur_svlan, 'id', cur_svlan)
+
+                                        if cur_role_val != 'cvlan' or cur_svlan_id != vlan_id:
+                                            print(f"[➔] Configurando C-VLAN {cvid} (Role: Customer, SVLAN: {target_vpls_vid})")
+                                            try:
+                                                cvlan_obj.qinq_role = 'cvlan'
+                                                cvlan_obj.qinq_svlan = vlan_id
+                                                cvlan_obj.save()
+                                                existing_cvlans_for_svlan[cvid] = cvlan_obj
+                                            except Exception as err:
+                                                print(f"[!] Erro ao salvar C-VLAN {cvid}: {err}")
+
+                            # Vincula a Terminação L2VPN à Service VLAN se a VLAN ainda não estiver atribuída
+                            if l2vpn_term_endpoint:
+                                l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
+                                terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
+                                if not terms_by_vlan:
+                                    print(f"[+] Vinculando L2VPN VPLS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
+                                    try:
+                                        l2vpn_term_endpoint.create(
+                                            l2vpn=l2vpn_id,
+                                            assigned_object_type='ipam.vlan',
+                                            assigned_object_id=vlan_id
+                                        )
+                                    except Exception as term_err:
+                                        print(f"[!] Aviso ao vincular L2VPN VPLS '{name}' a VLAN {target_vpls_vid}: {term_err}")
         except Exception as e:
             print(f"[!] Erro ao sincronizar L2VPN: {e}")
 
