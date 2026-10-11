@@ -1375,40 +1375,77 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 l2vpn_term_endpoint = getattr(nb.ipam, 'l2vpn_terminations', None)
 
             if l2vpn_endpoint:
+                vpws_names = set(v.get('name') for v in data.get('vpws', []))
+                vpls_names = set(v.get('name') for v in data.get('vpls', []))
+
                 for vpws in data['vpws']:
                     name = vpws['name']
                     pw_id_val = int(vpws['pw_id']) if vpws.get('pw_id') and str(vpws['pw_id']).isdigit() else None
+                    has_type_conflict = name in vpls_names
+                    name_with_suffix = f"{name} (VPWS)"
                     slug_candidate = re.sub(r'[^\w\-]', '_', name.lower()).strip('_')
-                    l2vpn = safe_get(l2vpn_endpoint, name=name) or safe_get(l2vpn_endpoint, slug=slug_candidate)
+                    slug_with_suffix = re.sub(r'[^\w\-]', '_', name_with_suffix.lower()).strip('_')
+
+                    # 1. Procura com sufixo (VPWS)
+                    l2vpn = safe_get(l2vpn_endpoint, name=name_with_suffix) or safe_get(l2vpn_endpoint, slug=slug_with_suffix)
+
+                    # 2. Se não achou com sufixo, procura nome base
                     if not l2vpn:
-                        print(f"[+] Criando L2VPN VPWS: {name} (Identifier/PW-ID: {pw_id_val})")
+                        l2vpn_base = safe_get(l2vpn_endpoint, name=name) or safe_get(l2vpn_endpoint, slug=slug_candidate)
+                        if l2vpn_base:
+                            base_type = getattr(l2vpn_base.type, 'value', str(l2vpn_base.type)).lower()
+                            if base_type == 'vpws' and not has_type_conflict:
+                                l2vpn = l2vpn_base
+                            elif base_type == 'vpws' and has_type_conflict:
+                                print(f"[➔] Conflito de tipo para L2VPN '{name}'. Renomeando existente para '{name_with_suffix}'...")
+                                l2vpn_base.name = name_with_suffix
+                                l2vpn_base.slug = slug_with_suffix
+                                try:
+                                    l2vpn_base.save()
+                                except Exception:
+                                    pass
+                                l2vpn = l2vpn_base
+                            else:
+                                other_suffix = f"{name} ({base_type.upper()})"
+                                print(f"[➔] Conflito: L2VPN '{name}' é {base_type.upper()} no NetBox, mas este serviço é VPWS. Renomeando existente para '{other_suffix}'...")
+                                l2vpn_base.name = other_suffix
+                                l2vpn_base.slug = re.sub(r'[^\w\-]', '_', other_suffix.lower()).strip('_')
+                                try:
+                                    l2vpn_base.save()
+                                except Exception:
+                                    pass
+
+                    if not l2vpn:
+                        target_name = name_with_suffix if (has_type_conflict or safe_get(l2vpn_endpoint, name=name)) else name
+                        target_slug = slug_with_suffix if target_name == name_with_suffix else slug_candidate
+                        print(f"[+] Criando L2VPN VPWS: {target_name} (Identifier/PW-ID: {pw_id_val})")
                         create_data = {
-                            'name': name,
-                            'slug': slug_candidate,
+                            'name': target_name,
+                            'slug': target_slug,
                             'type': 'vpws',
                             'status': 'active',
-                            'description': f"PW-ID: {vpws['pw_id']} - Neighbor: {vpws['neighbor']}"
+                            'description': f"PW-ID: {vpws.get('pw_id', '')} - Neighbor: {vpws.get('neighbor', '')}"
                         }
                         if pw_id_val is not None:
                             create_data['identifier'] = pw_id_val
                         try:
                             l2vpn = l2vpn_endpoint.create(**create_data)
                         except Exception as create_err:
-                            l2vpn = safe_get(l2vpn_endpoint, slug=slug_candidate) or safe_get(l2vpn_endpoint, name=name)
+                            l2vpn = safe_get(l2vpn_endpoint, slug=target_slug) or safe_get(l2vpn_endpoint, name=target_name)
                             if not l2vpn:
-                                print(f"[!] Erro ao criar L2VPN VPWS '{name}': {create_err}")
+                                print(f"[!] Erro ao criar L2VPN VPWS '{target_name}': {create_err}")
                                 continue
                     else:
                         need_up = False
                         if getattr(l2vpn.status, 'value', str(l2vpn.status)).lower() != 'active':
-                            print(f"[➔] Reativando L2VPN VPWS '{name}' -> Status: Active")
+                            print(f"[➔] Reativando L2VPN VPWS '{l2vpn.name}' -> Status: Active")
                             l2vpn.status = 'active'
                             need_up = True
 
                         cur_ident = getattr(l2vpn, 'identifier', None)
                         cur_ident_int = int(cur_ident) if cur_ident is not None and str(cur_ident).isdigit() else None
                         if pw_id_val is not None and cur_ident_int != pw_id_val:
-                            print(f"[➔] Atribuindo PW-ID {pw_id_val} ao Identifier da L2VPN VPWS '{name}'")
+                            print(f"[➔] Atribuindo PW-ID {pw_id_val} ao Identifier da L2VPN VPWS '{l2vpn.name}'")
                             l2vpn.identifier = pw_id_val
                             need_up = True
 
@@ -1426,6 +1463,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         if vlan_obj:
                             vlan_id = getattr(vlan_obj, 'id', getattr(vlan_obj, 'pk', None))
                             l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
+                            l2vpn_actual_name = getattr(l2vpn, 'name', name)
                             terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
                             terms_by_l2vpn = list(l2vpn_term_endpoint.filter(l2vpn_id=l2vpn_id))
 
@@ -1433,8 +1471,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             for term in list(terms_by_l2vpn):
                                 if getattr(term, 'assigned_object_type', None) == 'ipam.vlan' and term.assigned_object_id != vlan_id:
                                     other_vlan = safe_get(nb.ipam.vlans, id=term.assigned_object_id)
-                                    if not is_vlan_compatible_with_l2vpn(other_vlan, name):
-                                        print(f"[!] Removendo terminação incompatível {term.id} da L2VPN VPWS '{name}' (VLAN: {getattr(other_vlan, 'name', term.assigned_object_id)})")
+                                    if not is_vlan_compatible_with_l2vpn(other_vlan, l2vpn_actual_name):
+                                        print(f"[!] Removendo terminação incompatível {term.id} da L2VPN VPWS '{l2vpn_actual_name}' (VLAN: {getattr(other_vlan, 'name', term.assigned_object_id)})")
                                         try:
                                             term.delete()
                                             terms_by_l2vpn.remove(term)
@@ -1456,8 +1494,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
                             already_linked = any(t.assigned_object_id == vlan_id and getattr(t.l2vpn, 'id', getattr(t.l2vpn, 'pk', None)) == l2vpn_id for t in terms_by_l2vpn)
                             if not already_linked and not terms_by_l2vpn:
-                                if is_vlan_compatible_with_l2vpn(vlan_obj, name):
-                                    print(f"[+] Vinculando L2VPN VPWS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
+                                if terms_by_vlan:
+                                    print(f"[i] VLAN {vlan_obj.vid} ({vlan_obj.name}) já possui terminação na L2VPN '{getattr(terms_by_vlan[0].l2vpn, 'name', terms_by_vlan[0].l2vpn)}'. Ignorando vinculação duplicada.")
+                                elif is_vlan_compatible_with_l2vpn(vlan_obj, l2vpn_actual_name):
+                                    print(f"[+] Vinculando L2VPN VPWS '{l2vpn_actual_name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
                                     try:
                                         l2vpn_term_endpoint.create(
                                             l2vpn=l2vpn_id,
@@ -1465,9 +1505,9 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                             assigned_object_id=vlan_id
                                         )
                                     except Exception as term_err:
-                                        print(f"[!] Aviso ao vincular L2VPN VPWS '{name}' a VLAN {target_vlan_id}: {term_err}")
+                                        print(f"[!] Aviso ao vincular L2VPN VPWS '{l2vpn_actual_name}' a VLAN {target_vlan_id}: {term_err}")
                                 else:
-                                    print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPWS '{name}'")
+                                    print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPWS '{l2vpn_actual_name}'")
 
                             # Assegura Role VPWS-TUNEIS na VLAN
                             vpws_role_id = vlan_roles_cache.get('VPWS-TUNEIS')
@@ -1482,13 +1522,47 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     name = vpls['name']
                     vpls_pw_id = vpls.get('vlan_id')
                     pw_id_val = int(vpls_pw_id) if vpls_pw_id and str(vpls_pw_id).isdigit() else None
+                    has_type_conflict = name in vpws_names
+                    name_with_suffix = f"{name} (VPLS)"
                     slug_candidate = re.sub(r'[^\w\-]', '_', name.lower()).strip('_')
-                    l2vpn = safe_get(l2vpn_endpoint, name=name) or safe_get(l2vpn_endpoint, slug=slug_candidate)
+                    slug_with_suffix = re.sub(r'[^\w\-]', '_', name_with_suffix.lower()).strip('_')
+
+                    # 1. Procura com sufixo (VPLS)
+                    l2vpn = safe_get(l2vpn_endpoint, name=name_with_suffix) or safe_get(l2vpn_endpoint, slug=slug_with_suffix)
+
+                    # 2. Se não achou com sufixo, procura nome base
                     if not l2vpn:
-                        print(f"[+] Criando L2VPN VPLS: {name} (Identifier/PW-ID: {pw_id_val})")
+                        l2vpn_base = safe_get(l2vpn_endpoint, name=name) or safe_get(l2vpn_endpoint, slug=slug_candidate)
+                        if l2vpn_base:
+                            base_type = getattr(l2vpn_base.type, 'value', str(l2vpn_base.type)).lower()
+                            if base_type == 'vpls' and not has_type_conflict:
+                                l2vpn = l2vpn_base
+                            elif base_type == 'vpls' and has_type_conflict:
+                                print(f"[➔] Conflito de tipo para L2VPN '{name}'. Renomeando existente para '{name_with_suffix}'...")
+                                l2vpn_base.name = name_with_suffix
+                                l2vpn_base.slug = slug_with_suffix
+                                try:
+                                    l2vpn_base.save()
+                                except Exception:
+                                    pass
+                                l2vpn = l2vpn_base
+                            else:
+                                other_suffix = f"{name} ({base_type.upper()})"
+                                print(f"[➔] Conflito: L2VPN '{name}' é {base_type.upper()} no NetBox, mas este serviço é VPLS. Renomeando existente para '{other_suffix}'...")
+                                l2vpn_base.name = other_suffix
+                                l2vpn_base.slug = re.sub(r'[^\w\-]', '_', other_suffix.lower()).strip('_')
+                                try:
+                                    l2vpn_base.save()
+                                except Exception:
+                                    pass
+
+                    if not l2vpn:
+                        target_name = name_with_suffix if (has_type_conflict or safe_get(l2vpn_endpoint, name=name)) else name
+                        target_slug = slug_with_suffix if target_name == name_with_suffix else slug_candidate
+                        print(f"[+] Criando L2VPN VPLS: {target_name} (Identifier/PW-ID: {pw_id_val})")
                         create_data = {
-                            'name': name,
-                            'slug': slug_candidate,
+                            'name': target_name,
+                            'slug': target_slug,
                             'type': 'vpls',
                             'status': 'active',
                             'description': f"VPLS {name}"
@@ -1498,21 +1572,21 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         try:
                             l2vpn = l2vpn_endpoint.create(**create_data)
                         except Exception as create_err:
-                            l2vpn = safe_get(l2vpn_endpoint, slug=slug_candidate) or safe_get(l2vpn_endpoint, name=name)
+                            l2vpn = safe_get(l2vpn_endpoint, slug=target_slug) or safe_get(l2vpn_endpoint, name=target_name)
                             if not l2vpn:
-                                print(f"[!] Erro ao criar L2VPN VPLS '{name}': {create_err}")
+                                print(f"[!] Erro ao criar L2VPN VPLS '{target_name}': {create_err}")
                                 continue
                     else:
                         need_up = False
                         if getattr(l2vpn.status, 'value', str(l2vpn.status)).lower() != 'active':
-                            print(f"[➔] Reativando L2VPN VPLS '{name}' -> Status: Active")
+                            print(f"[➔] Reativando L2VPN VPLS '{l2vpn.name}' -> Status: Active")
                             l2vpn.status = 'active'
                             need_up = True
 
                         cur_ident = getattr(l2vpn, 'identifier', None)
                         cur_ident_int = int(cur_ident) if cur_ident is not None and str(cur_ident).isdigit() else None
                         if pw_id_val is not None and cur_ident_int != pw_id_val:
-                            print(f"[➔] Atribuindo PW-ID {pw_id_val} ao Identifier da L2VPN VPLS '{name}'")
+                            print(f"[➔] Atribuindo PW-ID {pw_id_val} ao Identifier da L2VPN VPLS '{l2vpn.name}'")
                             l2vpn.identifier = pw_id_val
                             need_up = True
 
@@ -1578,6 +1652,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                                 print(f"[!] Erro ao salvar C-VLAN {cvid}: {err}")
 
                             # Vincula a Terminação L2VPN à Service VLAN se a VLAN ainda não estiver atribuída
+                            l2vpn_actual_name = getattr(l2vpn, 'name', name)
                             if l2vpn_term_endpoint:
                                 l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
                                 terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
@@ -1587,8 +1662,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 for term in list(terms_by_l2vpn):
                                     if getattr(term, 'assigned_object_type', None) == 'ipam.vlan' and term.assigned_object_id != vlan_id:
                                         other_vlan = safe_get(nb.ipam.vlans, id=term.assigned_object_id)
-                                        if not is_vlan_compatible_with_l2vpn(other_vlan, name):
-                                            print(f"[!] Removendo terminação incompatível {term.id} da L2VPN VPLS '{name}' (VLAN: {getattr(other_vlan, 'name', term.assigned_object_id)})")
+                                        if not is_vlan_compatible_with_l2vpn(other_vlan, l2vpn_actual_name):
+                                            print(f"[!] Removendo terminação incompatível {term.id} da L2VPN VPLS '{l2vpn_actual_name}' (VLAN: {getattr(other_vlan, 'name', term.assigned_object_id)})")
                                             try:
                                                 term.delete()
                                                 terms_by_l2vpn.remove(term)
@@ -1610,8 +1685,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
                                 already_linked = any(t.assigned_object_id == vlan_id and getattr(t.l2vpn, 'id', getattr(t.l2vpn, 'pk', None)) == l2vpn_id for t in terms_by_l2vpn)
                                 if not already_linked and not terms_by_l2vpn:
-                                    if is_vlan_compatible_with_l2vpn(vlan_obj, name):
-                                        print(f"[+] Vinculando L2VPN VPLS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
+                                    if terms_by_vlan:
+                                        print(f"[i] VLAN {vlan_obj.vid} ({vlan_obj.name}) já possui terminação na L2VPN '{getattr(terms_by_vlan[0].l2vpn, 'name', terms_by_vlan[0].l2vpn)}'. Ignorando vinculação duplicada.")
+                                    elif is_vlan_compatible_with_l2vpn(vlan_obj, l2vpn_actual_name):
+                                        print(f"[+] Vinculando L2VPN VPLS '{l2vpn_actual_name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
                                         try:
                                             l2vpn_term_endpoint.create(
                                                 l2vpn=l2vpn_id,
@@ -1619,13 +1696,13 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                                 assigned_object_id=vlan_id
                                             )
                                         except Exception as term_err:
-                                            print(f"[!] Aviso ao vincular L2VPN VPLS '{name}' a VLAN {target_vpls_vid}: {term_err}")
+                                            print(f"[!] Aviso ao vincular L2VPN VPLS '{l2vpn_actual_name}' a VLAN {target_vpls_vid}: {term_err}")
                                     else:
-                                        print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPLS '{name}'")
+                                        print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPLS '{l2vpn_actual_name}'")
 
                                 # Assegura Role VPLS-TUNEIS na VLAN
                                 vpls_role_id = vlan_roles_cache.get('VPLS-TUNEIS')
-                                if vpls_role_id and getattr(vlan_obj.role, 'id', None) != vpls_role_id and is_vlan_compatible_with_l2vpn(vlan_obj, name):
+                                if vpls_role_id and getattr(vlan_obj.role, 'id', None) != vpls_role_id and is_vlan_compatible_with_l2vpn(vlan_obj, l2vpn_actual_name):
                                     try:
                                         vlan_obj.role = vpls_role_id
                                         vlan_obj.save()
