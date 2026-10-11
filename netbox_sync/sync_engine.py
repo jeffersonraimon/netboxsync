@@ -794,14 +794,29 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     if is_l3_subif and (if_type == 'virtual' or 'l3-' in if_name):
                         target_untagged = untagged_target_id or (vlan_target_ids[0] if vlan_target_ids else None)
                         cur_untagged = getattr(nb_iface.untagged_vlan, 'id', getattr(nb_iface.untagged_vlan, 'pk', nb_iface.untagged_vlan))
-                        if target_untagged and cur_untagged != target_untagged:
-                            nb_iface.untagged_vlan = target_untagged
-                            nb_iface.mode = 'access'
+                        cur_mode_raw = getattr(nb_iface, 'mode', None)
+                        cur_mode_val = getattr(cur_mode_raw, 'value', cur_mode_raw)
+                        cur_mode = cur_mode_val.lower() if cur_mode_val else None
+                        cur_tagged = getattr(nb_iface, 'tagged_vlans', []) or []
+
+                        if target_untagged and (cur_untagged != target_untagged or cur_mode != 'access' or cur_tagged):
+                            update_l3 = {
+                                'mode': 'access',
+                                'untagged_vlan': target_untagged,
+                                'tagged_vlans': []
+                            }
                             try:
-                                nb_iface.save()
+                                nb_iface.update(update_l3)
                                 print(f"[➔] Interface L3 {nb_iface.name} associada à VLAN: {untagged_vid or list(vlan_ids)}")
-                            except Exception as l3_save_err:
-                                print(f"[!] Aviso ao salvar VLAN na interface L3 {nb_iface.name}: {l3_save_err}")
+                            except Exception:
+                                nb_iface.untagged_vlan = target_untagged
+                                nb_iface.mode = 'access'
+                                nb_iface.tagged_vlans = []
+                                try:
+                                    nb_iface.save()
+                                    print(f"[➔] Interface L3 {nb_iface.name} associada à VLAN: {untagged_vid or list(vlan_ids)}")
+                                except Exception as l3_save_err:
+                                    print(f"[!] Aviso ao salvar VLAN na interface L3 {nb_iface.name}: {l3_save_err}")
                     else:
                         cur_mode_raw = getattr(nb_iface, 'mode', None)
                         cur_mode_val = getattr(cur_mode_raw, 'value', cur_mode_raw)
