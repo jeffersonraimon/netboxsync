@@ -126,7 +126,55 @@ def find_netbox_interface(nb, dev_id, if_name):
         if norm_target in iface.name.replace(" ", "-").lower() or iface.name.replace(" ", "-").lower() in norm_target:
             return iface
 
-    return None
+def get_interface_cable_peer(nb, iface_obj):
+    """
+    Retorna o peer conectado na interface (interface remota do outro lado do cabo) e o objeto do cabo,
+    ou (None, None) se não houver cabo conectado.
+    """
+    if not iface_obj or not getattr(iface_obj, 'cable', None):
+        return None, None
+
+    cable_obj = iface_obj.cable
+    link_peers = getattr(iface_obj, 'link_peers', None)
+    if link_peers:
+        return link_peers[0], cable_obj
+
+    # Fallback se link_peers não estiver preenchido diretamente no objeto
+    cable_id = getattr(cable_obj, 'id', getattr(cable_obj, 'pk', None))
+    if cable_id and hasattr(nb.dcim, 'cables'):
+        try:
+            full_cable = nb.dcim.cables.get(cable_id)
+            if full_cable:
+                all_terms = list(getattr(full_cable, 'a_terminations', [])) + list(getattr(full_cable, 'b_terminations', []))
+                loc_id = getattr(iface_obj, 'id', getattr(iface_obj, 'pk', None))
+                peers = [t for t in all_terms if getattr(t, 'id', getattr(t, 'pk', None)) != loc_id]
+                if peers:
+                    return peers[0], full_cable
+                return None, full_cable
+        except Exception:
+            pass
+    return None, cable_obj
+
+
+def delete_netbox_cable(nb, cable_obj):
+    """
+    Remove um cabo do NetBox com segurança.
+    """
+    if not cable_obj:
+        return False
+    cable_id = getattr(cable_obj, 'id', getattr(cable_obj, 'pk', None))
+    try:
+        if hasattr(cable_obj, 'delete'):
+            return cable_obj.delete()
+        elif cable_id and hasattr(nb.dcim, 'cables'):
+            return nb.dcim.cables.delete([cable_id])
+    except Exception as err:
+        try:
+            if cable_id and hasattr(nb.dcim, 'cables'):
+                return nb.dcim.cables.delete([cable_id])
+        except Exception:
+            pass
+    return False
 
 
 def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None, device_type_model=None, verify_ssl=None, sync_modules=None, driver=None):
@@ -1334,7 +1382,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     continue
 
                 loc_if_id = getattr(loc_iface, 'id', getattr(loc_iface, 'pk', None))
-                if getattr(loc_iface, 'cable', None) or loc_if_id in created_cables_loc_ids:
+                if loc_if_id in created_cables_loc_ids:
                     continue
 
                 rem_dev_name = lldp.get('remote_device')
@@ -1355,9 +1403,38 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     continue
 
                 rem_if_id = getattr(rem_iface, 'id', getattr(rem_iface, 'pk', None))
+
+                # Verificar se a interface local já possui cabo conectado
+                if getattr(loc_iface, 'cable', None):
+                    loc_peer, loc_cable = get_interface_cable_peer(nb, loc_iface)
+                    loc_peer_dev_id = getattr(getattr(loc_peer, 'device', None), 'id', None) if loc_peer else None
+                    loc_peer_if_id = getattr(loc_peer, 'id', None) if loc_peer else None
+
+                    # Se já está conectado exatamente ao vizinho LLDP correto, não precisa recriar
+                    if loc_peer_dev_id == rem_dev_id and loc_peer_if_id == rem_if_id:
+                        created_cables_loc_ids.add(loc_if_id)
+                        continue
+
+                    # Topologia mudou na interface local!
+                    loc_peer_name = f"{getattr(getattr(loc_peer, 'device', None), 'name', 'Desconhecido')} {abbreviate_ifname(getattr(loc_peer, 'name', ''))}" if loc_peer else "Desconhecido"
+                    print(f"[↻] Topologia alterada na interface local '{loc_iface.name}' ({hostname}): cabo anterior ({loc_peer_name}) desatualizado. Removendo cabo antigo...")
+                    delete_netbox_cable(nb, loc_cable)
+                    loc_iface.cable = None
+
+                # Verificar se a interface remota possui cabo conectado a outro destino
                 if getattr(rem_iface, 'cable', None):
-                    print(f"[!] Interface remota '{rem_iface.name}' ({rem_dev.name}) já possui um cabo conectado no NetBox.")
-                    continue
+                    rem_peer, rem_cable = get_interface_cable_peer(nb, rem_iface)
+                    rem_peer_dev_id = getattr(getattr(rem_peer, 'device', None), 'id', None) if rem_peer else None
+                    rem_peer_if_id = getattr(rem_peer, 'id', None) if rem_peer else None
+
+                    if rem_peer_dev_id == device_id and rem_peer_if_id == loc_if_id:
+                        created_cables_loc_ids.add(loc_if_id)
+                        continue
+
+                    rem_peer_name = f"{getattr(getattr(rem_peer, 'device', None), 'name', 'Desconhecido')} {abbreviate_ifname(getattr(rem_peer, 'name', ''))}" if rem_peer else "Desconhecido"
+                    print(f"[↻] Topologia alterada na interface remota '{rem_iface.name}' ({rem_dev.name}): estava conectada em {rem_peer_name}. Removendo cabo antigo para reatribuição...")
+                    delete_netbox_cable(nb, rem_cable)
+                    rem_iface.cable = None
 
                 cable_type = 'smf' if ('hundred' in loc_if_name or 'ten' in loc_if_name or 'twenty' in loc_if_name) else 'cat6'
                 loc_abb = abbreviate_ifname(loc_iface.name)
@@ -1365,7 +1442,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 cable_label = f"{hostname} {loc_abb} <-> {rem_dev.name} {rem_abb}"[:100]
                 print(f"[+] Criando Cabo LLDP: {loc_abb} ({hostname}) <---> {rem_abb} ({rem_dev.name})...")
                 try:
-                    cable_endpoint.create(
+                    new_cable = cable_endpoint.create(
                         a_terminations=[{'object_type': 'dcim.interface', 'object_id': loc_if_id}],
                         b_terminations=[{'object_type': 'dcim.interface', 'object_id': rem_if_id}],
                         type=cable_type,
@@ -1373,6 +1450,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         label=cable_label,
                         description=f"LLDP auto-discovered: {cable_label}"
                     )
+                    loc_iface.cable = new_cable
                     created_cables_loc_ids.add(loc_if_id)
                 except Exception as cable_err:
                     print(f"[!] Aviso ao criar cabo LLDP: {cable_err}")
@@ -1421,7 +1499,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         cable_label = f"{hostname} {loc_abb} <-> {target_dev.name} {rem_abb}"[:100]
                         print(f"[+] Criando Cabo (via Descrição): {loc_abb} ({hostname}) <---> {rem_abb} ({target_dev.name})...")
                         try:
-                            cable_endpoint.create(
+                            new_cable = cable_endpoint.create(
                                 a_terminations=[{'object_type': 'dcim.interface', 'object_id': loc_if_id}],
                                 b_terminations=[{'object_type': 'dcim.interface', 'object_id': rem_if_id}],
                                 type=cable_type,
@@ -1429,6 +1507,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 label=cable_label,
                                 description=f"Description auto-discovered: {cable_label}"
                             )
+                            loc_iface.cable = new_cable
                             created_cables_loc_ids.add(loc_if_id)
                         except Exception as cable_err:
                             print(f"[!] Aviso ao criar cabo via descrição: {cable_err}")
