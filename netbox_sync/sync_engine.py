@@ -233,6 +233,27 @@ def find_netbox_vlan(nb, vid, vname=None, site_id=None, group_id=None, preferred
 
     return candidates[0]
 
+
+def is_vlan_compatible_with_l2vpn(vlan_obj, l2vpn_name):
+    """
+    Verifica se uma VLAN possui compatibilidade semântica com o nome da L2VPN antes de vinculá-la.
+    Evita associar VLANs de clientes terceiros 
+    apenas por coincidência de VLAN ID.
+    """
+    if not vlan_obj or not l2vpn_name:
+        return False
+    v_name = getattr(vlan_obj, 'name', '') or ''
+    vn = v_name.lower().replace('-', '').replace('_', '').replace(' ', '')
+    ln = l2vpn_name.lower().replace('-', '').replace('_', '').replace(' ', '')
+    if vn in ln or ln in vn:
+        return True
+    v_tokens = set(re.findall(r'[a-zA-Z0-9]+', v_name.lower())) - {'vlan', 'ptp', 'customer', 'l2vpn', 'vpws', 'vpls', str(getattr(vlan_obj, 'vid', ''))}
+    l_tokens = set(re.findall(r'[a-zA-Z0-9]+', l2vpn_name.lower())) - {'vlan', 'ptp', 'customer', 'l2vpn', 'vpws', 'vpls', str(getattr(vlan_obj, 'vid', ''))}
+    if v_tokens and l_tokens and v_tokens.intersection(l_tokens):
+        return True
+    return False
+
+
 def get_interface_cable_peer(nb, iface_obj):
     """
     Retorna o peer conectado na interface (interface remota do outro lado do cabo) e o objeto do cabo,
@@ -1401,16 +1422,20 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             vlan_id = getattr(vlan_obj, 'id', getattr(vlan_obj, 'pk', None))
                             l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
                             terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
-                            if not terms_by_vlan:
-                                print(f"[+] Vinculando L2VPN VPWS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
-                                try:
-                                    l2vpn_term_endpoint.create(
-                                        l2vpn=l2vpn_id,
-                                        assigned_object_type='ipam.vlan',
-                                        assigned_object_id=vlan_id
-                                    )
-                                except Exception as term_err:
-                                    print(f"[!] Aviso ao vincular L2VPN VPWS '{name}' a VLAN {target_vlan_id}: {term_err}")
+                            terms_by_l2vpn = list(l2vpn_term_endpoint.filter(l2vpn_id=l2vpn_id))
+                            if not terms_by_vlan and not terms_by_l2vpn:
+                                if is_vlan_compatible_with_l2vpn(vlan_obj, name):
+                                    print(f"[+] Vinculando L2VPN VPWS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
+                                    try:
+                                        l2vpn_term_endpoint.create(
+                                            l2vpn=l2vpn_id,
+                                            assigned_object_type='ipam.vlan',
+                                            assigned_object_id=vlan_id
+                                        )
+                                    except Exception as term_err:
+                                        print(f"[!] Aviso ao vincular L2VPN VPWS '{name}' a VLAN {target_vlan_id}: {term_err}")
+                                else:
+                                    print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPWS '{name}'")
 
                 for vpls in data['vpls']:
                     name = vpls['name']
@@ -1515,16 +1540,20 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             if l2vpn_term_endpoint:
                                 l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
                                 terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
-                                if not terms_by_vlan:
-                                    print(f"[+] Vinculando L2VPN VPLS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
-                                    try:
-                                        l2vpn_term_endpoint.create(
-                                            l2vpn=l2vpn_id,
-                                            assigned_object_type='ipam.vlan',
-                                            assigned_object_id=vlan_id
-                                        )
-                                    except Exception as term_err:
-                                        print(f"[!] Aviso ao vincular L2VPN VPLS '{name}' a VLAN {target_vpls_vid}: {term_err}")
+                                terms_by_l2vpn = list(l2vpn_term_endpoint.filter(l2vpn_id=l2vpn_id))
+                                if not terms_by_vlan and not terms_by_l2vpn:
+                                    if is_vlan_compatible_with_l2vpn(vlan_obj, name):
+                                        print(f"[+] Vinculando L2VPN VPLS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
+                                        try:
+                                            l2vpn_term_endpoint.create(
+                                                l2vpn=l2vpn_id,
+                                                assigned_object_type='ipam.vlan',
+                                                assigned_object_id=vlan_id
+                                            )
+                                        except Exception as term_err:
+                                            print(f"[!] Aviso ao vincular L2VPN VPLS '{name}' a VLAN {target_vpls_vid}: {term_err}")
+                                    else:
+                                        print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPLS '{name}'")
         except Exception as e:
             print(f"[!] Erro ao sincronizar L2VPN: {e}")
 
