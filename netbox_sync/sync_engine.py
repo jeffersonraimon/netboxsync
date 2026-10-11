@@ -1322,8 +1322,22 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 vlan_obj.qinq_role = 'svlan'
                                 vlan_obj.save()
 
+                            # Carrega em cache as C-VLANs já vinculadas a esta S-VLAN no NetBox
+                            existing_cvlans_for_svlan = {}
+                            try:
+                                svlan_cvlan_list = list(nb.ipam.vlans.filter(qinq_svlan_id=vlan_id))
+                                for cv in svlan_cvlan_list:
+                                    existing_cvlans_for_svlan[cv.vid] = cv
+                            except Exception:
+                                pass
+
                             # Processa e associa as Customer VLANs (C-VLANs) a esta S-VLAN
                             for cvid in vpls.get('customer_vlans', []):
+                                # 1. Se já existe uma C-VLAN com esse VID vinculada a esta S-VLAN, ela já está correta!
+                                if cvid in existing_cvlans_for_svlan:
+                                    continue
+
+                                # 2. Caso contrário, verifica se existe objeto em nb_vlans para configurar
                                 if cvid in nb_vlans:
                                     cvlan_obj = nb_vlans[cvid]
                                     cvlan_id = cvlan_obj.id if hasattr(cvlan_obj, 'id') else None
@@ -1338,6 +1352,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                             cvlan_obj.qinq_role = 'cvlan'
                                             cvlan_obj.qinq_svlan = vlan_id
                                             cvlan_obj.save()
+                                            existing_cvlans_for_svlan[cvid] = cvlan_obj
                                         except Exception as err:
                                             print(f"[!] Erro ao salvar C-VLAN {cvid}: {err}")
 
