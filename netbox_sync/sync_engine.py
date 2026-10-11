@@ -129,18 +129,40 @@ def find_netbox_interface(nb, dev_id, if_name):
 def get_interface_cable_peer(nb, iface_obj):
     """
     Retorna o peer conectado na interface (interface remota do outro lado do cabo) e o objeto do cabo,
-    ou (None, None) se não houver cabo conectado.
+    ou (None, None) se não houver cabo conectado. Trata com segurança objetos de cabos que possam ter sido
+    deletados no NetBox (evitando RequestError 404 na avaliação lazy do pynetbox).
     """
-    if not iface_obj or not getattr(iface_obj, 'cable', None):
+    if not iface_obj:
         return None, None
 
-    cable_obj = iface_obj.cable
-    link_peers = getattr(iface_obj, 'link_peers', None)
+    try:
+        cable_obj = getattr(iface_obj, 'cable', None)
+        if not cable_obj:
+            return None, None
+    except Exception:
+        iface_obj.cable = None
+        return None, None
+
+    cable_id = None
+    try:
+        cable_id = getattr(cable_obj, 'id', getattr(cable_obj, 'pk', None))
+    except Exception:
+        iface_obj.cable = None
+        return None, None
+
+    link_peers = None
+    try:
+        link_peers = getattr(iface_obj, 'link_peers', None)
+    except Exception:
+        pass
+
     if link_peers:
-        return link_peers[0], cable_obj
+        try:
+            return link_peers[0], cable_obj
+        except Exception:
+            pass
 
     # Fallback se link_peers não estiver preenchido diretamente no objeto
-    cable_id = getattr(cable_obj, 'id', getattr(cable_obj, 'pk', None))
     if cable_id and hasattr(nb.dcim, 'cables'):
         try:
             full_cable = nb.dcim.cables.get(cable_id)
@@ -151,8 +173,13 @@ def get_interface_cable_peer(nb, iface_obj):
                 if peers:
                     return peers[0], full_cable
                 return None, full_cable
+            else:
+                # Cabo não existe mais no NetBox
+                iface_obj.cable = None
+                return None, None
         except Exception:
-            pass
+            iface_obj.cable = None
+            return None, None
     return None, cable_obj
 
 
@@ -163,20 +190,47 @@ def delete_netbox_cable(nb, cable_obj, deleted_cable_ids=None):
     """
     if not cable_obj:
         return False
-    cable_id = getattr(cable_obj, 'id', getattr(cable_obj, 'pk', None))
+
+    cable_id = None
+    try:
+        cable_id = getattr(cable_obj, 'id', getattr(cable_obj, 'pk', None))
+    except Exception as id_err:
+        err_msg = str(id_err)
+        if 'could not be found' in err_msg or '404' in err_msg:
+            return True
+        return False
+
     if deleted_cable_ids is not None and cable_id and cable_id in deleted_cable_ids:
         return True
+
     try:
         if hasattr(cable_obj, 'delete'):
-            res = cable_obj.delete()
-            if deleted_cable_ids is not None and cable_id:
-                deleted_cable_ids.add(cable_id)
-            return res
-        elif cable_id and hasattr(nb.dcim, 'cables'):
-            res = nb.dcim.cables.delete([cable_id])
-            if deleted_cable_ids is not None and cable_id:
-                deleted_cable_ids.add(cable_id)
-            return res
+            try:
+                res = cable_obj.delete()
+                if deleted_cable_ids is not None and cable_id:
+                    deleted_cable_ids.add(cable_id)
+                return res
+            except Exception as del_err:
+                err_msg = str(del_err)
+                if 'could not be found' in err_msg or '404' in err_msg or 'Not Found' in err_msg:
+                    if deleted_cable_ids is not None and cable_id:
+                        deleted_cable_ids.add(cable_id)
+                    return True
+                raise
+
+        if cable_id and hasattr(nb.dcim, 'cables'):
+            try:
+                res = nb.dcim.cables.delete([cable_id])
+                if deleted_cable_ids is not None and cable_id:
+                    deleted_cable_ids.add(cable_id)
+                return res
+            except Exception as del_err2:
+                err_msg = str(del_err2)
+                if 'could not be found' in err_msg or '404' in err_msg or 'Not Found' in err_msg:
+                    if deleted_cable_ids is not None and cable_id:
+                        deleted_cable_ids.add(cable_id)
+                    return True
+                raise
     except Exception as err:
         err_msg = str(err)
         # Se o cabo já não existir mais no NetBox (404), trata como sucesso
@@ -1439,7 +1493,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         continue
 
                     # Topologia mudou na interface local!
-                    loc_peer_name = f"{getattr(getattr(loc_peer, 'device', None), 'name', 'Desconhecido')} {abbreviate_ifname(getattr(loc_peer, 'name', ''))}" if loc_peer else "Desconhecido"
+                    loc_peer_dev_name = 'Desconhecido'
+                    loc_peer_if_name = ''
+                    if loc_peer:
+                        try:
+                            loc_peer_dev_name = getattr(getattr(loc_peer, 'device', None), 'name', None) or 'Desconhecido'
+                            loc_peer_if_name = getattr(loc_peer, 'name', '') or ''
+                        except Exception:
+                            pass
+                    loc_peer_name = f"{loc_peer_dev_name} {abbreviate_ifname(loc_peer_if_name)}".strip() or "Desconhecido"
                     print(f"[↻] Topologia alterada na interface local '{loc_iface.name}' ({hostname}): cabo anterior ({loc_peer_name}) desatualizado. Removendo cabo antigo...")
                     delete_netbox_cable(nb, loc_cable, deleted_cable_ids)
                     loc_iface.cable = None
@@ -1454,7 +1516,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         created_cables_loc_ids.add(loc_if_id)
                         continue
 
-                    rem_peer_name = f"{getattr(getattr(rem_peer, 'device', None), 'name', 'Desconhecido')} {abbreviate_ifname(getattr(rem_peer, 'name', ''))}" if rem_peer else "Desconhecido"
+                    rem_peer_dev_name = 'Desconhecido'
+                    rem_peer_if_name = ''
+                    if rem_peer:
+                        try:
+                            rem_peer_dev_name = getattr(getattr(rem_peer, 'device', None), 'name', None) or 'Desconhecido'
+                            rem_peer_if_name = getattr(rem_peer, 'name', '') or ''
+                        except Exception:
+                            pass
+                    rem_peer_name = f"{rem_peer_dev_name} {abbreviate_ifname(rem_peer_if_name)}".strip() or "Desconhecido"
                     print(f"[↻] Topologia alterada na interface remota '{rem_iface.name}' ({rem_dev.name}): estava conectada em {rem_peer_name}. Removendo cabo antigo para reatribuição...")
                     delete_netbox_cable(nb, rem_cable, deleted_cable_ids)
                     rem_iface.cable = None
