@@ -153,6 +153,8 @@ netboxsync/
 
 ## 💻 Exemplos de Uso
 
+Para a senha, é recomendado colocar entre aspas simples.
+
 ### 1. Ler arquivo local em modo Simulação (Dry-Run)
 ```bash
 python3 main.py --file config_backup.txt --driver dmos --dry-run
@@ -160,7 +162,7 @@ python3 main.py --file config_backup.txt --driver dmos --dry-run
 
 ### 2. Conectar via SSH a um equipamento e sincronizar tudo com NetBox
 ```bash
-python3 main.py --host 192.168.1.1 -u admin -p MinhaSenha --driver dmos
+python3 main.py --host 192.168.1.1 -u admin -p 'MinhaSenha' --driver dmos
 ```
 
 ### 3. Sincronizar uma lista de equipamentos a partir de um arquivo TXT
@@ -170,7 +172,7 @@ python3 main.py --hosts-file lista_switches.txt -u admin --driver dmos
 
 ### 4. Sincronizar equipamento Mikrotik RouterOS (com porta SSH customizada)
 ```bash
-python3 main.py --host 192.168.1.1 -P 2269 -u admin -p MinhaSenha --driver routeros --device-type "E50UG"
+python3 main.py --host 192.168.1.1 -P 2269 -u admin -p 'MinhaSenha' --driver routeros --device-type "E50UG"
 ```
 
 ### 5. Sincronizar apenas módulos específicos (ex: IPs e Túneis VPN)
@@ -186,7 +188,7 @@ python3 main.py --file config_huawei_switch.txt --driver huawei_vrp \
 
 ### 7. Sincronizar Huawei VRP (roteador/BNG) via SSH
 ```bash
-python3 main.py --host 10.0.0.1 -u admin -p MinhaSenha --driver huawei_vrp \
+python3 main.py --host 10.0.0.1 -u admin -p 'MinhaSenha' --driver huawei_vrp \
   --device-type "NetEngine 8000 M8" --site POP-01 --role ROUTER
 ```
 
