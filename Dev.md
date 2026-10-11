@@ -125,7 +125,7 @@ Quando você quiser adicionar um fabricante novo no código (ex: Huawei VRP), ba
    Vizinhos LLDP                 |  ✅ Sim (JSON ou regex tabular)   | ✅ Sim (display lldp neighbor brief)  |        ✅ Sim (display json)        |   ✅ Sim (/ip neighbor print terse)
    Logical Systems / VDCs        |              ❌ Não               |                ❌ Não                 |    ✅ Sim (set logical-systems)     |                ❌ Não
    Tratamento de deactivate      |                N/A                |                  N/A                  |   ✅ Sim (ignora blocos inativos)   |     ✅ Sim (filtra disabled=yes)
-   Deteção Dinâmica de Tags      |   ✅ Sim (BGP, OSPF, LDP, RSVP,   |  ✅ Sim (BGP, OSPF, ISIS, LDP, etc.)  | ⚠️ Estático ({'junos', 'juniper'})  |    ✅ Sim (BGP, OSPF, MPLS, VRRP)
+   Deteção Dinâmica de Tags      |   ✅ Sim (BGP, OSPF, LDP, RSVP,   |  ✅ Sim (BGP, OSPF, ISIS, LDP, etc.)  | ✅ Sim (BGP, OSPF, LDP, RSVP, etc.)  |    ✅ Sim (BGP, OSPF, MPLS, VRRP)
                                  |               etc.)               |                                       |                                     |
   ──────
   ### 3. Síntese das Diferenças Estratégicas
