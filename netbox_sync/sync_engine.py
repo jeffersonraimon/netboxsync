@@ -242,13 +242,18 @@ def is_vlan_compatible_with_l2vpn(vlan_obj, l2vpn_name):
     """
     if not vlan_obj or not l2vpn_name:
         return False
-    v_name = getattr(vlan_obj, 'name', '') or ''
+    if isinstance(vlan_obj, str):
+        v_name = vlan_obj
+        vid = ''
+    else:
+        v_name = getattr(vlan_obj, 'name', '') or ''
+        vid = str(getattr(vlan_obj, 'vid', ''))
     vn = v_name.lower().replace('-', '').replace('_', '').replace(' ', '')
     ln = l2vpn_name.lower().replace('-', '').replace('_', '').replace(' ', '')
     if vn in ln or ln in vn:
         return True
-    v_tokens = set(re.findall(r'[a-zA-Z0-9]+', v_name.lower())) - {'vlan', 'ptp', 'customer', 'l2vpn', 'vpws', 'vpls', str(getattr(vlan_obj, 'vid', ''))}
-    l_tokens = set(re.findall(r'[a-zA-Z0-9]+', l2vpn_name.lower())) - {'vlan', 'ptp', 'customer', 'l2vpn', 'vpws', 'vpls', str(getattr(vlan_obj, 'vid', ''))}
+    v_tokens = set(re.findall(r'[a-zA-Z0-9]+', v_name.lower())) - {'vlan', 'ptp', 'customer', 'l2vpn', 'vpws', 'vpls', vid}
+    l_tokens = set(re.findall(r'[a-zA-Z0-9]+', l2vpn_name.lower())) - {'vlan', 'ptp', 'customer', 'l2vpn', 'vpws', 'vpls', vid}
     if v_tokens and l_tokens and v_tokens.intersection(l_tokens):
         return True
     return False
@@ -1423,7 +1428,34 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
                             terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
                             terms_by_l2vpn = list(l2vpn_term_endpoint.filter(l2vpn_id=l2vpn_id))
-                            if not terms_by_vlan and not terms_by_l2vpn:
+
+                            # Auto-cura: remover terminações incompatíveis no L2VPN
+                            for term in list(terms_by_l2vpn):
+                                if getattr(term, 'assigned_object_type', None) == 'ipam.vlan' and term.assigned_object_id != vlan_id:
+                                    other_vlan = safe_get(nb.ipam.vlans, id=term.assigned_object_id)
+                                    if not is_vlan_compatible_with_l2vpn(other_vlan, name):
+                                        print(f"[!] Removendo terminação incompatível {term.id} da L2VPN VPWS '{name}' (VLAN: {getattr(other_vlan, 'name', term.assigned_object_id)})")
+                                        try:
+                                            term.delete()
+                                            terms_by_l2vpn.remove(term)
+                                        except Exception as del_err:
+                                            print(f"[!] Aviso ao remover terminação incompatível {term.id}: {del_err}")
+
+                            # Auto-cura: remover terminação se a VLAN estiver associada a outro L2VPN incompatível
+                            for term in list(terms_by_vlan):
+                                other_lid = getattr(term.l2vpn, 'id', getattr(term.l2vpn, 'pk', None))
+                                if other_lid != l2vpn_id:
+                                    other_l2vpn = safe_get(l2vpn_endpoint, id=other_lid)
+                                    if other_l2vpn and not is_vlan_compatible_with_l2vpn(vlan_obj, getattr(other_l2vpn, 'name', '')):
+                                        print(f"[!] Desvinculando VLAN '{vlan_obj.name}' da L2VPN incompatível '{getattr(other_l2vpn, 'name', other_lid)}'")
+                                        try:
+                                            term.delete()
+                                            terms_by_vlan.remove(term)
+                                        except Exception as del_err:
+                                            print(f"[!] Aviso ao remover terminação cruzada {term.id}: {del_err}")
+
+                            already_linked = any(t.assigned_object_id == vlan_id and getattr(t.l2vpn, 'id', getattr(t.l2vpn, 'pk', None)) == l2vpn_id for t in terms_by_l2vpn)
+                            if not already_linked and not terms_by_l2vpn:
                                 if is_vlan_compatible_with_l2vpn(vlan_obj, name):
                                     print(f"[+] Vinculando L2VPN VPWS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
                                     try:
@@ -1436,6 +1468,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                         print(f"[!] Aviso ao vincular L2VPN VPWS '{name}' a VLAN {target_vlan_id}: {term_err}")
                                 else:
                                     print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPWS '{name}'")
+
+                            # Assegura Role VPWS-TUNEIS na VLAN
+                            vpws_role_id = vlan_roles_cache.get('VPWS-TUNEIS')
+                            if vpws_role_id and getattr(vlan_obj.role, 'id', None) != vpws_role_id and is_vlan_compatible_with_l2vpn(vlan_obj, name):
+                                try:
+                                    vlan_obj.role = vpws_role_id
+                                    vlan_obj.save()
+                                except Exception:
+                                    pass
 
                 for vpls in data['vpls']:
                     name = vpls['name']
@@ -1541,7 +1582,34 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 l2vpn_id = getattr(l2vpn, 'id', getattr(l2vpn, 'pk', None))
                                 terms_by_vlan = list(l2vpn_term_endpoint.filter(assigned_object_id=vlan_id))
                                 terms_by_l2vpn = list(l2vpn_term_endpoint.filter(l2vpn_id=l2vpn_id))
-                                if not terms_by_vlan and not terms_by_l2vpn:
+
+                                # Auto-cura: remover terminações incompatíveis no L2VPN VPLS
+                                for term in list(terms_by_l2vpn):
+                                    if getattr(term, 'assigned_object_type', None) == 'ipam.vlan' and term.assigned_object_id != vlan_id:
+                                        other_vlan = safe_get(nb.ipam.vlans, id=term.assigned_object_id)
+                                        if not is_vlan_compatible_with_l2vpn(other_vlan, name):
+                                            print(f"[!] Removendo terminação incompatível {term.id} da L2VPN VPLS '{name}' (VLAN: {getattr(other_vlan, 'name', term.assigned_object_id)})")
+                                            try:
+                                                term.delete()
+                                                terms_by_l2vpn.remove(term)
+                                            except Exception as del_err:
+                                                print(f"[!] Aviso ao remover terminação incompatível {term.id}: {del_err}")
+
+                                # Auto-cura: remover terminação se a VLAN estiver associada a outro L2VPN incompatível
+                                for term in list(terms_by_vlan):
+                                    other_lid = getattr(term.l2vpn, 'id', getattr(term.l2vpn, 'pk', None))
+                                    if other_lid != l2vpn_id:
+                                        other_l2vpn = safe_get(l2vpn_endpoint, id=other_lid)
+                                        if other_l2vpn and not is_vlan_compatible_with_l2vpn(vlan_obj, getattr(other_l2vpn, 'name', '')):
+                                            print(f"[!] Desvinculando VLAN '{vlan_obj.name}' da L2VPN incompatível '{getattr(other_l2vpn, 'name', other_lid)}'")
+                                            try:
+                                                term.delete()
+                                                terms_by_vlan.remove(term)
+                                            except Exception as del_err:
+                                                print(f"[!] Aviso ao remover terminação cruzada {term.id}: {del_err}")
+
+                                already_linked = any(t.assigned_object_id == vlan_id and getattr(t.l2vpn, 'id', getattr(t.l2vpn, 'pk', None)) == l2vpn_id for t in terms_by_l2vpn)
+                                if not already_linked and not terms_by_l2vpn:
                                     if is_vlan_compatible_with_l2vpn(vlan_obj, name):
                                         print(f"[+] Vinculando L2VPN VPLS '{name}' a VLAN {vlan_obj.vid} ({vlan_obj.name})")
                                         try:
@@ -1554,6 +1622,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                             print(f"[!] Aviso ao vincular L2VPN VPLS '{name}' a VLAN {target_vpls_vid}: {term_err}")
                                     else:
                                         print(f"[!] Ignorando vinculação incompatível: VLAN '{vlan_obj.name}' não corresponde à L2VPN VPLS '{name}'")
+
+                                # Assegura Role VPLS-TUNEIS na VLAN
+                                vpls_role_id = vlan_roles_cache.get('VPLS-TUNEIS')
+                                if vpls_role_id and getattr(vlan_obj.role, 'id', None) != vpls_role_id and is_vlan_compatible_with_l2vpn(vlan_obj, name):
+                                    try:
+                                        vlan_obj.role = vpls_role_id
+                                        vlan_obj.save()
+                                    except Exception:
+                                        pass
         except Exception as e:
             print(f"[!] Erro ao sincronizar L2VPN: {e}")
 
