@@ -411,9 +411,12 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     hostname = data['hostname']
     if not hostname:
         print("[!] Erro: Hostname nao encontrado na configuracao.")
-        return
+        return {'hostname': None, 'reassigned_ips': []}
 
     print(f"[*] Processando equipamento: {hostname}")
+
+    # Rastreia IPs que foram reatribuídos de outra interface/equipamento para identificação de possíveis duplicidades
+    ip_reassignments = []
 
     # 1. Garantir VRF-Global
     vrf_obj = safe_get(nb.ipam.vrfs, name=vrf_name)
@@ -1215,9 +1218,37 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             ip_obj.assigned_object_type = 'dcim.interface'
                             need_ip_save = True
                         if cur_ass_id != iface_id:
-                            print(f"[➔] Atribuindo IP {canonical_ip_str} à interface '{iface_target.name}' no NetBox...")
+                            # Tenta descobrir de onde o IP estava atribuído anteriormente
+                            prev_device_name = ""
+                            prev_iface_name = ""
+                            if cur_ass_id and hasattr(ip_obj, 'assigned_object') and ip_obj.assigned_object:
+                                prev_obj = ip_obj.assigned_object
+                                prev_iface_name = getattr(prev_obj, 'name', '') or str(prev_obj)
+                                prev_dev = getattr(prev_obj, 'device', None)
+                                if prev_dev:
+                                    prev_device_name = getattr(prev_dev, 'name', '') or str(prev_dev)
+                            elif cur_ass_id:
+                                prev_iface_name = f"obj_id:{cur_ass_id}"
+
+                            if prev_device_name and prev_device_name != hostname:
+                                origin_str = f"{prev_device_name}:{prev_iface_name}"
+                            elif prev_iface_name:
+                                origin_str = prev_iface_name
+                            else:
+                                origin_str = "nenhuma (desvinculado)"
+
+                            print(f"[➔] Atribuindo IP {canonical_ip_str} à interface '{iface_target.name}' no NetBox (estava em: {origin_str})...")
                             ip_obj.assigned_object_id = iface_id
                             need_ip_save = True
+
+                            # Registra apenas se o IP estava em outra interface/equipamento (alerta de duplicidade)
+                            if cur_ass_id:
+                                ip_reassignments.append({
+                                    'ip': canonical_ip_str,
+                                    'new_interface': iface_target.name,
+                                    'previous_device': prev_device_name or hostname,
+                                    'previous_interface': prev_iface_name or f"id:{cur_ass_id}",
+                                })
 
                         cur_vrf_id = getattr(ip_obj.vrf, 'id', ip_obj.vrf) if getattr(ip_obj, 'vrf', None) else None
                         if cur_vrf_id != vrf_id:
@@ -1959,3 +1990,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             print(f"[!] Aviso ao criar cabo via descrição: {cable_err}")
 
     print("\n[✔] Sincronizacao concluida com sucesso!")
+    return {
+        'hostname': hostname,
+        'reassigned_ips': ip_reassignments
+    }

@@ -88,7 +88,7 @@ def process_single_host(host, args, password, driver):
     verify_ssl = not (args.insecure or config.DISABLE_SSL_VERIFY)
     modules_list = [m.strip().lower() for m in args.sync_modules.split(",")] if args.sync_modules else ["all"]
     try:
-        sync_to_netbox(
+        sync_res = sync_to_netbox(
             parsed_data,
             url=args.url,
             token=args.token,
@@ -99,10 +99,11 @@ def process_single_host(host, args, password, driver):
             sync_modules=modules_list,
             driver=driver
         )
-        return True, hostname
+        reassigned = sync_res.get('reassigned_ips', []) if isinstance(sync_res, dict) else []
+        return True, hostname, reassigned
     except Exception as sync_err:
         print(f"[!] Erro ao sincronizar {hostname} com NetBox: {sync_err}")
-        return False, f"Erro NetBox: {sync_err}"
+        return False, f"Erro NetBox: {sync_err}", []
 
 
 def main():
@@ -175,13 +176,17 @@ def main():
         print(f"\n[*] Lista carregada com {len(hosts)} equipamentos para processar (Driver: {driver.driver_name}).\n")
 
         for ip_host in hosts:
-            success, info = process_single_host(ip_host, args, args.password, driver)
-            results.append({'host': ip_host, 'success': success, 'info': info})
+            res_tuple = process_single_host(ip_host, args, args.password, driver)
+            success, info = res_tuple[0], res_tuple[1]
+            reassigned = res_tuple[2] if len(res_tuple) > 2 else []
+            results.append({'host': ip_host, 'success': success, 'info': info, 'reassigned_ips': reassigned})
 
     # 2. Processamento via Host Único via SSH
     elif args.host:
-        success, info = process_single_host(args.host, args, args.password, driver)
-        results.append({'host': args.host, 'success': success, 'info': info})
+        res_tuple = process_single_host(args.host, args, args.password, driver)
+        success, info = res_tuple[0], res_tuple[1]
+        reassigned = res_tuple[2] if len(res_tuple) > 2 else []
+        results.append({'host': args.host, 'success': success, 'info': info, 'reassigned_ips': reassigned})
 
     # 3. Processamento via Arquivo de Saída Local
     else:
@@ -200,12 +205,12 @@ def main():
 
         if args.dry_run:
             print("[i] Modo Dry-Run ativo. Nenhuma alteração foi realizada no NetBox.")
-            results.append({'host': args.file, 'success': True, 'info': f"{hostname} (Dry-Run)"})
+            results.append({'host': args.file, 'success': True, 'info': f"{hostname} (Dry-Run)", 'reassigned_ips': []})
         else:
             verify_ssl = not (args.insecure or config.DISABLE_SSL_VERIFY)
             modules_list = [m.strip().lower() for m in args.sync_modules.split(",")] if args.sync_modules else ["all"]
             try:
-                sync_to_netbox(
+                sync_res = sync_to_netbox(
                     parsed_data,
                     url=args.url,
                     token=args.token,
@@ -216,9 +221,10 @@ def main():
                     sync_modules=modules_list,
                     driver=driver
                 )
-                results.append({'host': args.file, 'success': True, 'info': hostname})
+                reassigned = sync_res.get('reassigned_ips', []) if isinstance(sync_res, dict) else []
+                results.append({'host': args.file, 'success': True, 'info': hostname, 'reassigned_ips': reassigned})
             except Exception as sync_err:
-                results.append({'host': args.file, 'success': False, 'info': str(sync_err)})
+                results.append({'host': args.file, 'success': False, 'info': str(sync_err), 'reassigned_ips': []})
 
     # 4. EXIBIÇÃO DO RESUMO FINAL DA EXECUÇÃO
     print("\n" + "="*80)
@@ -228,6 +234,7 @@ def main():
     print("-" * 80)
     total_sucesso = 0
     total_falha = 0
+    all_reassigned_ips = []
 
     for r in results:
         status_str = "[ ✔ OK ]" if r['success'] else "[ ✖ ERRO ]"
@@ -236,11 +243,32 @@ def main():
         else:
             total_falha += 1
         print(f"{r['host']:<25} | {status_str:<12} | {r['info']:<35}")
+        for re_item in r.get('reassigned_ips', []):
+            all_reassigned_ips.append({
+                'host': r['host'],
+                'hostname': r['info'],
+                **re_item
+            })
 
     print("="*80)
     print(f" Total Processados : {len(results)}")
     print(f" Sucesso           : {total_sucesso}")
     print(f" Falhas            : {total_falha}")
+
+    # 5. ALERTA DE IPS REATRIBUÍDOS / POSSÍVEIS DUPLICIDADES
+    if all_reassigned_ips:
+        print("\n" + "!"*80)
+        print("  ⚠️  ALERTA: IPS REATRIBUÍDOS ENTRE INTERFACES/DISPOSITIVOS (POSSÍVEL DUPLICIDADE)")
+        print("!"*80)
+        print(f"{'IP / PREFIXO':<22} | {'NOVO DESTINO':<26} | {'ORIGEM ANTERIOR NO NETBOX':<26}")
+        print("-" * 80)
+        for re_ip in all_reassigned_ips:
+            ip_str = re_ip['ip']
+            novo_dst = f"{re_ip['hostname']}:{re_ip['new_interface']}"
+            origem = f"{re_ip['previous_device']}:{re_ip['previous_interface']}"
+            print(f"{ip_str:<22} | {novo_dst:<26} | {origem:<26}")
+        print("!"*80)
+
     print("="*80 + "\n")
 
 
