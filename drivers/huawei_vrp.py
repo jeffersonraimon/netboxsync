@@ -248,6 +248,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             'vpls': [],                        # [{'name','vlan_id','is_qinq','customer_vlans','neighbors','interfaces'}]
             'interface_vlans': {},             # iface -> set(vlan_ids) tagged
             'interface_untagged_vlans': {},    # iface -> untagged_vlan_id
+            'interface_vlan_names': {},        # iface -> {vid: vlan_name}
             'inventory_items': [],
             'vrrp_groups': [],
             'lldp_neighbors': [],
@@ -262,12 +263,27 @@ class HuaweiVRPDriver(BaseDeviceDriver):
 
         def register_vlan(vid: int, name: Optional[str] = None) -> None:
             """Registra uma VLAN garantindo nome padrao quando nao informado."""
+            clean_name = clean_description(name) if name else None
             if vid not in data['vlans']:
-                data['vlans'][vid] = name or f"VLAN-{vid}"
+                data['vlans'][vid] = clean_name or f"VLAN-{vid}"
+            elif clean_name and (data['vlans'][vid] == f"VLAN-{vid}" or not data['vlans'][vid]):
+                data['vlans'][vid] = clean_name
 
-        def add_iface_vlan(iface_name: str, vid: int) -> None:
+        def add_iface_vlan(iface_name: str, vid: int, vname: Optional[str] = None) -> None:
             """Marca uma VLAN como tagged na interface (usada para terminais L3/VPWS/VPLS)."""
-            data['interface_vlans'].setdefault(iface_name, set()).add(int(vid))
+            vid_int = int(vid)
+            data['interface_vlans'].setdefault(iface_name, set()).add(vid_int)
+            clean_name = clean_description(vname) if vname else None
+            if clean_name:
+                data['interface_vlan_names'].setdefault(iface_name, {})[vid_int] = clean_name
+
+        def add_iface_untagged_vlan(iface_name: str, vid: int, vname: Optional[str] = None) -> None:
+            """Marca uma VLAN como untagged na interface."""
+            vid_int = int(vid)
+            data['interface_untagged_vlans'][iface_name] = vid_int
+            clean_name = clean_description(vname) if vname else None
+            if clean_name:
+                data['interface_vlan_names'].setdefault(iface_name, {})[vid_int] = clean_name
 
         used_names = set()
 
@@ -423,8 +439,8 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 l3_entry['parent'] = iface_base(if_name) if is_subinterface(if_name) else None
                 data['interfaces_l3'].append(l3_entry)
                 if vid:
-                    register_vlan(vid)
-                    add_iface_vlan(if_name, vid)
+                    register_vlan(vid, desc)
+                    add_iface_vlan(if_name, vid, vname=desc)
             elif iface_base(if_name).lower().startswith('eth-trunk'):
                 lag_entry = dict(common)
                 lag_entry['members'] = []
@@ -452,9 +468,10 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                     (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
                 entry_name = unique_name(desc, if_name)
                 if vid:
-                    register_vlan(vid, f"VLAN-{vid}-{entry_name}")
+                    vlan_display_name = desc or entry_name
+                    register_vlan(vid, vlan_display_name)
                     vlan_roles_map[vid] = "VPWS-TUNEIS"
-                    add_iface_vlan(if_name, vid)
+                    add_iface_vlan(if_name, vid, vname=vlan_display_name)
                 data['vpws'].append({
                     'name': entry_name,
                     'group': '',
@@ -470,12 +487,15 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             # --- VPLS: l2 binding vsi <NOME> ---
             for vsi_match in re.finditer(r'^\s*l2 binding vsi\s+(\S+)', body, re.MULTILINE):
                 vsi_name = vsi_match.group(1)
-                vid = vlanif_vid(if_name)
-                binding = vsi_bindings.setdefault(vsi_name, {'vlan_id': None, 'interfaces': []})
+                vid = vlanif_vid(if_name) or \
+                    (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
+                binding = vsi_bindings.setdefault(vsi_name, {'vlan_id': None, 'interfaces': [], 'descriptions': {}})
                 if vid and not binding['vlan_id']:
                     binding['vlan_id'] = vid
                 if if_name not in binding['interfaces']:
                     binding['interfaces'].append(if_name)
+                if desc:
+                    binding['descriptions'][if_name] = desc
 
             # --- BNG/BRAS: user-vlan <ini> <fim> [qinq <svlan>] ---
             for uv_match in re.finditer(r'^\s*user-vlan\s+(\d+)\s+(\d+)(?:\s+qinq\s+(\d+))?', body, re.MULTILINE):
@@ -484,11 +504,13 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 customer_vlans = list(range(min(first_vid, last_vid), max(first_vid, last_vid) + 1))
                 entry_name = unique_name(desc, if_name)
                 if svlan:
-                    register_vlan(svlan, f"VLAN-{svlan}-{entry_name}")
+                    vlan_display_name = desc or entry_name
+                    register_vlan(svlan, vlan_display_name)
                     vlan_roles_map[svlan] = "VPLS-TUNEIS"
-                    add_iface_vlan(if_name, svlan)
+                    add_iface_vlan(if_name, svlan, vname=vlan_display_name)
                 for cvid in customer_vlans:
-                    register_vlan(cvid, f"VLAN-{cvid}-Customer-{entry_name}")
+                    cv_name = f"{entry_name}-Customer-{cvid}" if entry_name else f"VLAN-{cvid}"
+                    register_vlan(cvid, cv_name)
                     vlan_roles_map[cvid] = "VPLS-TUNEIS"
                 data['vpls'].append({
                     'name': entry_name,
@@ -530,9 +552,13 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             vid = binding.get('vlan_id')
             entry_name = vsi_name
             used_names.add(entry_name.lower())
+            vsi_display_name = desc or entry_name
             if vid:
-                register_vlan(vid, f"VLAN-{vid}-{vsi_name}")
+                register_vlan(vid, vsi_display_name)
                 vlan_roles_map[vid] = "VPLS-TUNEIS"
+                for b_if in binding.get('interfaces', []):
+                    if_desc = binding.get('descriptions', {}).get(b_if) or vsi_display_name
+                    add_iface_vlan(b_if, vid, vname=if_desc)
             data['vpls'].append({
                 'name': entry_name,
                 'group': '',

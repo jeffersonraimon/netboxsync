@@ -348,5 +348,20 @@ def test_junos_tags_with_real_config_file():
     assert 'Logical-Systems' in tags
 
 
+def test_junos_interface_vlan_names():
+    raw_config = """
+set system host-name RT-SSA-01
+set interfaces ae4 unit 15 description "ISP-TESTEE"
+set interfaces ae4 unit 15 vlan-id 15
+set interfaces ae4 unit 15 family inet address 192.168.0.1/30
+set interfaces ge-0/0/1 unit 0 family ethernet-switching interface-mode access
+set interfaces ge-0/0/1 unit 0 family ethernet-switching vlan members VLAN-MGMT-100
+set vlans VLAN-MGMT-100 vlan-id 100
+"""
+    driver = JuniperJunosDriver()
+    parsed = driver.parse_data({"config": raw_config})
 
-
+    assert 'interface_vlan_names' in parsed
+    assert parsed['interface_vlan_names'].get('ae4.15', {}).get(15) == 'ISP-TESTEE'
+    assert parsed['interface_vlan_names'].get('ge-0/0/1.0', {}).get(100) == 'VLAN-MGMT-100'
+    assert parsed['vlans'].get(15) == 'ISP-TESTEE'

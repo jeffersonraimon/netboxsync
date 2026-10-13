@@ -597,6 +597,33 @@ def test_huawei_driver_parse_dict_outputs_and_empty_input():
     assert empty['lags'] == [] and empty['vpws'] == [] and empty['vpls'] == []
 
 
+def test_huawei_driver_interface_vlan_names():
+    sample_cfg = """
+sysname HW-TEST-01
+#
+interface GigabitEthernet0/0/1.15
+ description TESTE-270257
+ vlan-type dot1q 15
+ ip address 10.0.0.1 255.255.255.252
+#
+interface GigabitEthernet0/0/2.115
+ description TESTE-aaa
+ vlan-type dot1q 115
+ mpls l2vc 10.254.1.25 115
+#
+return
+"""
+    driver = get_driver('huawei_vrp')
+    parsed = driver.parse_data(sample_cfg)
+
+    assert 'interface_vlan_names' in parsed
+    assert parsed['interface_vlan_names'].get('GigabitEthernet0/0/1.15', {}).get(15) == 'TESTE-270257'
+    assert parsed['interface_vlan_names'].get('GigabitEthernet0/0/2.115', {}).get(115) == 'TESTE-aaa'
+    assert parsed['vlans'].get(15) == 'TESTE-270257'
+    assert parsed['vlans'].get(115) == 'TESTE-aaa'
+
+
+
 
 
 

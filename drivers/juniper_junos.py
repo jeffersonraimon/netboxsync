@@ -160,7 +160,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
         logical_systems = self._parse_logical_systems(config_raw_active)
         vlans = self._parse_vlans(config_raw_active)
         lags, lag_members = self._parse_lags(config_raw_active)
-        physical_ifaces, l3_units, interface_vlans, interface_untagged_vlans = self._parse_interfaces(config_raw_active, lag_members)
+        physical_ifaces, l3_units, interface_vlans, interface_untagged_vlans, interface_vlan_names = self._parse_interfaces(config_raw_active, lag_members)
 
         # Filtra interfaces fisicas e subinterfaces desativadas
         physical_ifaces = [i for i in physical_ifaces if i['name'] not in deactivated_ifaces]
@@ -217,6 +217,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
             'vpls': [],
             'interface_vlans': interface_vlans,
             'interface_untagged_vlans': interface_untagged_vlans,
+            'interface_vlan_names': interface_vlan_names,
             'inventory_items': inventory_items,
             'vrrp_groups': [],
             'lldp_neighbors': lldp_neighbors,
@@ -426,6 +427,31 @@ class JuniperJunosDriver(BaseDeviceDriver):
                     vid = int(vid_match.group(1))
                     if vid not in vlans:
                         vlans[vid] = vmem_clean
+
+        # 3. Inferência via subinterfaces com vlan-id e description
+        # Ex: set interfaces ae4 unit 15 description "ISP-TESTEEE"
+        #     set interfaces ae4 unit 15 vlan-id 15
+        unit_vlan_ids = {}
+        unit_descriptions = {}
+        for line in config_raw.splitlines():
+            line = line.strip()
+            m_vlan = re.search(r'set interfaces (\S+)\s+unit\s+(\d+)\s+vlan-id\s+(\d+)', line)
+            if m_vlan:
+                key = f"{m_vlan.group(1)}.{m_vlan.group(2)}"
+                unit_vlan_ids[key] = int(m_vlan.group(3))
+            m_desc = re.search(r'set interfaces (\S+)\s+unit\s+(\d+)\s+description\s+"(.*?)"', line) or \
+                     re.search(r'set interfaces (\S+)\s+unit\s+(\d+)\s+description\s+(\S+)', line)
+            if m_desc:
+                key = f"{m_desc.group(1)}.{m_desc.group(2)}"
+                unit_descriptions[key] = m_desc.group(3).strip()
+
+        for key, vid in unit_vlan_ids.items():
+            desc = unit_descriptions.get(key)
+            if desc and (vid not in vlans or vlans[vid] == f"VLAN-{vid}"):
+                vlans[vid] = desc
+            elif vid not in vlans:
+                vlans[vid] = f"VLAN-{vid}"
+
         return vlans
 
     def _parse_irb_descriptions(self, config_raw: str) -> Dict[str, str]:
@@ -480,7 +506,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
 
         return list(lags_dict.values()), lag_members
 
-    def _parse_interfaces(self, config_raw: str, lag_members: Set[str]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Set[int]]]:
+    def _parse_interfaces(self, config_raw: str, lag_members: Set[str]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Set[int]], Dict[str, int], Dict[str, Dict[int, str]]]:
         """
         Parse de interfaces físicas e unidades lógicas/VLANs.
         """
@@ -488,14 +514,32 @@ class JuniperJunosDriver(BaseDeviceDriver):
         l3_units = []
         interface_vlans = {}
         interface_untagged_vlans = {}
+        interface_vlan_names = {}
 
         # Mapeia VLAN name -> ID para rápida busca
         vlan_name_to_id = {}
-        for vid, vname in self._parse_vlans(config_raw).items():
+        vlan_id_to_name = self._parse_vlans(config_raw)
+        for vid, vname in vlan_id_to_name.items():
             vlan_name_to_id[vname] = vid
 
         # Mapeia descrições automáticas de IRB via set vlans <name> l3-interface irb.X
         irb_desc_map = self._parse_irb_descriptions(config_raw)
+
+        # Mapeia todas as descrições de interfaces e subinterfaces para não depender da ordem das linhas
+        pre_desc_map = {}
+        for line in config_raw.splitlines():
+            line_clean = line.strip()
+            line_clean = re.sub(r'^set\s+logical-systems\s+\S+\s+', 'set ', line_clean)
+            if " description " in line_clean:
+                m_ud = re.search(r'set interfaces (\S+)\s+unit\s+(\d+)\s+description\s+"(.*?)"', line_clean) or \
+                      re.search(r'set interfaces (\S+)\s+unit\s+(\d+)\s+description\s+(\S+)', line_clean)
+                if m_ud:
+                    pre_desc_map[f"{m_ud.group(1)}.{m_ud.group(2)}"] = m_ud.group(3).strip()
+                else:
+                    m_bd = re.search(r'set interfaces (\S+)\s+description\s+"(.*?)"', line_clean) or \
+                          re.search(r'set interfaces (\S+)\s+description\s+(\S+)', line_clean)
+                    if m_bd:
+                        pre_desc_map[m_bd.group(1)] = m_bd.group(2).strip()
 
         # Mapeia modos de interface (access vs trunk) acumulados por interface física/unidade
         iface_modes = {}
@@ -541,12 +585,12 @@ class JuniperJunosDriver(BaseDeviceDriver):
                     unit_id = m_unit.group(2)
                     unit_name = f"{base_if}.{unit_id}"
 
-                    # Checa descrição da subinterface unit ou fallback para irb_desc_map
-                    unit_desc = irb_desc_map.get(unit_name, "")
+                    # Checa descrição da subinterface unit ou fallback para pre_desc_map ou irb_desc_map
+                    unit_desc = pre_desc_map.get(unit_name) or irb_desc_map.get(unit_name, "")
                     if " description " in line:
                         m_udesc = re.search(r'description "(.*?)"', line) or re.search(r'description (\S+)', line)
                         if m_udesc:
-                            unit_desc = m_udesc.group(1)
+                            unit_desc = m_udesc.group(1).strip()
 
                     if unit_name not in ifaces_map:
                         ifaces_map[unit_name] = {
@@ -566,6 +610,8 @@ class JuniperJunosDriver(BaseDeviceDriver):
                         if unit_name not in interface_vlans:
                             interface_vlans[unit_name] = set()
                         interface_vlans[unit_name].add(v_id)
+                        if unit_desc:
+                            interface_vlan_names.setdefault(unit_name, {})[v_id] = unit_desc
 
                     # Checa membros de vlan (ethernet-switching)
                     m_vlan = re.search(r'vlan members (\S+)', line)
@@ -580,15 +626,20 @@ class JuniperJunosDriver(BaseDeviceDriver):
                         if v_id:
                             target_if = unit_name
                             mode_assigned = iface_modes.get(target_if) or iface_modes.get(base_if)
+                            v_name = vlan_id_to_name.get(v_id) or v_member
 
                             if mode_assigned == 'access':
                                 # Em modo access, vincula como untagged_vlan na subinterface unit
                                 interface_untagged_vlans[target_if] = v_id
+                                if v_name:
+                                    interface_vlan_names.setdefault(target_if, {})[v_id] = v_name
                             else:
                                 # Adiciona ao mapeamento de VLANs tagged da subinterface unit
                                 if target_if not in interface_vlans:
                                     interface_vlans[target_if] = set()
                                 interface_vlans[target_if].add(v_id)
+                                if v_name:
+                                    interface_vlan_names.setdefault(target_if, {})[v_id] = v_name
 
                     # Checa se é uma subinterface L3/L2 (possui IP / family inet/inet6, possui vlan-id, unit > 0, ou irb/lo0/vlan)
                     has_inet = "family inet" in line or "family inet6" in line
@@ -611,7 +662,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
                           re.search(r'set interfaces (\S+)\s+unit\s+(\d+)\s+description\s+(\S+)', line)
                 if m_udesc:
                     target_if = f"{m_udesc.group(1)}.{m_udesc.group(2)}"
-                    desc_val = m_udesc.group(3)
+                    desc_val = m_udesc.group(3).strip()
                     if target_if not in ifaces_map:
                         ifaces_map[target_if] = {'name': target_if, 'description': desc_val, 'enabled': True, 'mtu': 1500, 'speed': 10000}
                     else:
@@ -621,12 +672,20 @@ class JuniperJunosDriver(BaseDeviceDriver):
                     for l3_item in l3_units:
                         if l3_item['name'] == target_if:
                             l3_item['description'] = desc_val
+
+                    # Se a subinterface já possui vlan associada, atualiza em interface_vlan_names
+                    if target_if in interface_vlans:
+                        for vid in interface_vlans[target_if]:
+                            interface_vlan_names.setdefault(target_if, {})[vid] = desc_val
+                    if target_if in interface_untagged_vlans:
+                        vid = interface_untagged_vlans[target_if]
+                        interface_vlan_names.setdefault(target_if, {})[vid] = desc_val
                 else:
                     m_bdesc = re.search(r'set interfaces (\S+)\s+description\s+"(.*?)"', line) or \
                               re.search(r'set interfaces (\S+)\s+description\s+(\S+)', line)
                     if m_bdesc:
                         target_if = m_bdesc.group(1)
-                        desc_val = m_bdesc.group(2)
+                        desc_val = m_bdesc.group(2).strip()
                         if target_if not in ifaces_map:
                             ifaces_map[target_if] = {'name': target_if, 'description': desc_val, 'enabled': True, 'mtu': 1500, 'speed': 10000}
                         else:
@@ -647,7 +706,7 @@ class JuniperJunosDriver(BaseDeviceDriver):
                         ifaces_map[iface_name]['enabled'] = False
 
         physical_ifaces = list(ifaces_map.values())
-        return physical_ifaces, l3_units, interface_vlans, interface_untagged_vlans
+        return physical_ifaces, l3_units, interface_vlans, interface_untagged_vlans, interface_vlan_names
 
     def _parse_ips(self, config_raw: str) -> List[Dict[str, str]]:
         """
