@@ -411,12 +411,14 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     hostname = data['hostname']
     if not hostname:
         print("[!] Erro: Hostname nao encontrado na configuracao.")
-        return {'hostname': None, 'reassigned_ips': []}
+        return {'hostname': None, 'reassigned_ips': [], 'reassigned_roles': []}
 
     print(f"[*] Processando equipamento: {hostname}")
 
     # Rastreia IPs que foram reatribuídos de outra interface/equipamento para identificação de possíveis duplicidades
     ip_reassignments = []
+    # Rastreia atribuições e alterações de Role em VLANs para auditoria no resumo final
+    vlan_role_assignments = []
 
     # 1. Garantir VRF-Global
     vrf_obj = safe_get(nb.ipam.vrfs, name=vrf_name)
@@ -667,9 +669,16 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     need_save = True
 
                 if target_role_id and getattr(vlan.role, 'id', None) != target_role_id:
-                    print(f"[➔] Atribuindo Role '{target_role_name}' para a VLAN {vid} ({vlan.name})")
+                    prev_role_name = getattr(vlan.role, 'name', None) or (vlan.role.slug if hasattr(vlan.role, 'slug') else str(vlan.role or 'Nenhuma'))
+                    print(f"[➔] Atribuindo Role '{target_role_name}' para a VLAN {vid} ({vlan.name}) [anterior: {prev_role_name}]")
                     vlan.role = target_role_id
                     need_save = True
+                    vlan_role_assignments.append({
+                        'vid': vid,
+                        'vlan_name': vlan.name,
+                        'new_role': target_role_name,
+                        'previous_role': prev_role_name or 'Nenhuma'
+                    })
 
                 if need_save:
                     vlan.save()
@@ -1544,8 +1553,16 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                             vpws_role_id = vlan_roles_cache.get('VPWS-TUNEIS')
                             if vpws_role_id and getattr(vlan_obj.role, 'id', None) != vpws_role_id and is_vlan_compatible_with_l2vpn(vlan_obj, name):
                                 try:
+                                    prev_role_name = getattr(vlan_obj.role, 'name', None) or (vlan_obj.role.slug if hasattr(vlan_obj.role, 'slug') else str(vlan_obj.role or 'Nenhuma'))
+                                    print(f"[➔] Atribuindo Role 'VPWS-TUNEIS' para a VLAN {vlan_obj.vid} ({vlan_obj.name}) [anterior: {prev_role_name}]")
                                     vlan_obj.role = vpws_role_id
                                     vlan_obj.save()
+                                    vlan_role_assignments.append({
+                                        'vid': vlan_obj.vid,
+                                        'vlan_name': vlan_obj.name,
+                                        'new_role': 'VPWS-TUNEIS',
+                                        'previous_role': prev_role_name or 'Nenhuma'
+                                    })
                                 except Exception:
                                     pass
 
@@ -1735,8 +1752,16 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 vpls_role_id = vlan_roles_cache.get('VPLS-TUNEIS')
                                 if vpls_role_id and getattr(vlan_obj.role, 'id', None) != vpls_role_id and is_vlan_compatible_with_l2vpn(vlan_obj, l2vpn_actual_name):
                                     try:
+                                        prev_role_name = getattr(vlan_obj.role, 'name', None) or (vlan_obj.role.slug if hasattr(vlan_obj.role, 'slug') else str(vlan_obj.role or 'Nenhuma'))
+                                        print(f"[➔] Atribuindo Role 'VPLS-TUNEIS' para a VLAN {vlan_obj.vid} ({vlan_obj.name}) [anterior: {prev_role_name}]")
                                         vlan_obj.role = vpls_role_id
                                         vlan_obj.save()
+                                        vlan_role_assignments.append({
+                                            'vid': vlan_obj.vid,
+                                            'vlan_name': vlan_obj.name,
+                                            'new_role': 'VPLS-TUNEIS',
+                                            'previous_role': prev_role_name or 'Nenhuma'
+                                        })
                                     except Exception:
                                         pass
         except Exception as e:
@@ -1992,5 +2017,6 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     print("\n[✔] Sincronizacao concluida com sucesso!")
     return {
         'hostname': hostname,
-        'reassigned_ips': ip_reassignments
+        'reassigned_ips': ip_reassignments,
+        'reassigned_roles': vlan_role_assignments
     }

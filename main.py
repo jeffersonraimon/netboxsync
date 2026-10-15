@@ -99,11 +99,12 @@ def process_single_host(host, args, password, driver):
             sync_modules=modules_list,
             driver=driver
         )
-        reassigned = sync_res.get('reassigned_ips', []) if isinstance(sync_res, dict) else []
-        return True, hostname, reassigned
+        reassigned_ips = sync_res.get('reassigned_ips', []) if isinstance(sync_res, dict) else []
+        reassigned_roles = sync_res.get('reassigned_roles', []) if isinstance(sync_res, dict) else []
+        return True, hostname, reassigned_ips, reassigned_roles
     except Exception as sync_err:
         print(f"[!] Erro ao sincronizar {hostname} com NetBox: {sync_err}")
-        return False, f"Erro NetBox: {sync_err}", []
+        return False, f"Erro NetBox: {sync_err}", [], []
 
 
 def main():
@@ -178,15 +179,17 @@ def main():
         for ip_host in hosts:
             res_tuple = process_single_host(ip_host, args, args.password, driver)
             success, info = res_tuple[0], res_tuple[1]
-            reassigned = res_tuple[2] if len(res_tuple) > 2 else []
-            results.append({'host': ip_host, 'success': success, 'info': info, 'reassigned_ips': reassigned})
+            reassigned_ips = res_tuple[2] if len(res_tuple) > 2 else []
+            reassigned_roles = res_tuple[3] if len(res_tuple) > 3 else []
+            results.append({'host': ip_host, 'success': success, 'info': info, 'reassigned_ips': reassigned_ips, 'reassigned_roles': reassigned_roles})
 
     # 2. Processamento via Host Único via SSH
     elif args.host:
         res_tuple = process_single_host(args.host, args, args.password, driver)
         success, info = res_tuple[0], res_tuple[1]
-        reassigned = res_tuple[2] if len(res_tuple) > 2 else []
-        results.append({'host': args.host, 'success': success, 'info': info, 'reassigned_ips': reassigned})
+        reassigned_ips = res_tuple[2] if len(res_tuple) > 2 else []
+        reassigned_roles = res_tuple[3] if len(res_tuple) > 3 else []
+        results.append({'host': args.host, 'success': success, 'info': info, 'reassigned_ips': reassigned_ips, 'reassigned_roles': reassigned_roles})
 
     # 3. Processamento via Arquivo de Saída Local
     else:
@@ -205,7 +208,7 @@ def main():
 
         if args.dry_run:
             print("[i] Modo Dry-Run ativo. Nenhuma alteração foi realizada no NetBox.")
-            results.append({'host': args.file, 'success': True, 'info': f"{hostname} (Dry-Run)", 'reassigned_ips': []})
+            results.append({'host': args.file, 'success': True, 'info': f"{hostname} (Dry-Run)", 'reassigned_ips': [], 'reassigned_roles': []})
         else:
             verify_ssl = not (args.insecure or config.DISABLE_SSL_VERIFY)
             modules_list = [m.strip().lower() for m in args.sync_modules.split(",")] if args.sync_modules else ["all"]
@@ -221,10 +224,11 @@ def main():
                     sync_modules=modules_list,
                     driver=driver
                 )
-                reassigned = sync_res.get('reassigned_ips', []) if isinstance(sync_res, dict) else []
-                results.append({'host': args.file, 'success': True, 'info': hostname, 'reassigned_ips': reassigned})
+                reassigned_ips = sync_res.get('reassigned_ips', []) if isinstance(sync_res, dict) else []
+                reassigned_roles = sync_res.get('reassigned_roles', []) if isinstance(sync_res, dict) else []
+                results.append({'host': args.file, 'success': True, 'info': hostname, 'reassigned_ips': reassigned_ips, 'reassigned_roles': reassigned_roles})
             except Exception as sync_err:
-                results.append({'host': args.file, 'success': False, 'info': str(sync_err), 'reassigned_ips': []})
+                results.append({'host': args.file, 'success': False, 'info': str(sync_err), 'reassigned_ips': [], 'reassigned_roles': []})
 
     # 4. EXIBIÇÃO DO RESUMO FINAL DA EXECUÇÃO
     print("\n" + "="*80)
@@ -235,6 +239,7 @@ def main():
     total_sucesso = 0
     total_falha = 0
     all_reassigned_ips = []
+    all_reassigned_roles = []
 
     for r in results:
         status_str = "[ ✔ OK ]" if r['success'] else "[ ✖ ERRO ]"
@@ -248,6 +253,12 @@ def main():
                 'host': r['host'],
                 'hostname': r['info'],
                 **re_item
+            })
+        for role_item in r.get('reassigned_roles', []):
+            all_reassigned_roles.append({
+                'host': r['host'],
+                'hostname': r['info'],
+                **role_item
             })
 
     print("="*80)
@@ -267,6 +278,21 @@ def main():
             novo_dst = f"{re_ip['hostname']}:{re_ip['new_interface']}"
             origem = f"{re_ip['previous_device']}:{re_ip['previous_interface']}"
             print(f"{ip_str:<22} | {novo_dst:<26} | {origem:<26}")
+        print("!"*80)
+
+    # 6. ALERTA DE ROLES DE VLAN ATRIBUÍDAS / ALTERADAS
+    if all_reassigned_roles:
+        print("\n" + "!"*80)
+        print("  ⚠️  ATENÇÃO: ROLES DE VLAN ATRIBUÍDAS OU ALTERADAS NO NETBOX")
+        print("!"*80)
+        print(f"{'VID':<6} | {'NOME DA VLAN':<30} | {'NOVA ROLE':<18} | {'ROLE ANTERIOR':<18}")
+        print("-" * 80)
+        for r_item in all_reassigned_roles:
+            vid_str = str(r_item['vid'])
+            vname = r_item['vlan_name'][:30]
+            new_r = r_item['new_role']
+            prev_r = r_item['previous_role']
+            print(f"{vid_str:<6} | {vname:<30} | {new_r:<18} | {prev_r:<18}")
         print("!"*80)
 
     print("="*80 + "\n")
