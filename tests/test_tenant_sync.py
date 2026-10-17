@@ -255,3 +255,56 @@ def test_sync_to_netbox_creates_vdc(mock_pynetbox_api):
     assert iface_create_call.kwargs.get('vdcs') == [77] or iface_create_call.kwargs.get('vdc') == 77
 
 
+@patch("pynetbox.api")
+def test_sync_to_netbox_ignores_fe80_link_local_ips(mock_pynetbox_api):
+    """Garante que IPs IPv6 Link-Local (fe80::/10) sejam ignorados e não criados/reatribuídos no NetBox."""
+    mock_nb = MagicMock()
+    mock_pynetbox_api.return_value = mock_nb
+    mock_nb.ipam.ip_addresses.filter.return_value = []
+    mock_nb.ipam.vrfs.filter.return_value = [MagicMock(id=1, name="VRF-Global")]
+    mock_nb.dcim.sites.filter.return_value = [MagicMock(id=1, name="POP-PADRAO")]
+    mock_nb.dcim.device_types.filter.return_value = [MagicMock(id=2)]
+    mock_nb.dcim.device_roles.filter.return_value = [MagicMock(id=3)]
+    device_obj = MagicMock(id=100, comments="", config_context={})
+    device_obj.name = "MK-ROUTER-TEST"
+    mock_nb.dcim.devices.filter.return_value = [device_obj]
+    iface_obj = MagicMock(id=200)
+    iface_obj.name = "ether1"
+    mock_nb.dcim.interfaces.filter.return_value = [iface_obj]
+
+    data = {
+        'hostname': 'MK-ROUTER-TEST',
+        'serial': 'TEST-SN',
+        'model': 'CCR1036',
+        'tags': set(),
+        'vlans': {},
+        'interfaces_physical': [{'name': 'ether1', 'description': 'UPLINK', 'enabled': True}],
+        'interfaces_l3': [],
+        'lags': [],
+        'ips': [
+            {'interface': 'ether1', 'address': 'fe80::1/10'},
+            {'interface': 'ether1', 'address': 'fe80::2a11:ecff:fe6b:916a/10'},
+            {'interface': 'ether1', 'address': '2001:db8:10::1/64'}
+        ],
+        'vpws': [],
+        'vpls': [],
+        'interface_vlans': {},
+        'interface_untagged_vlans': {},
+        'vrrp_groups': [],
+        'lldp_neighbors': []
+    }
+
+    sync_to_netbox(
+        data,
+        url="http://netbox.local",
+        token="test_token",
+        sync_modules=['ips']
+    )
+
+    # Verifica que apenas o IP global 2001:db8:10::1/64 foi criado, e nenhum fe80::
+    for call in mock_nb.ipam.ip_addresses.create.call_args_list:
+        created_addr = call.kwargs.get('address', '')
+        assert not created_addr.lower().startswith('fe80')
+
+
+

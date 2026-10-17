@@ -922,6 +922,7 @@ Virtual-Ethernet0/3/31.4000       10.0.0.1/30          up         up       --
 Interface                    Physical              Protocol VPN
 Eth-Trunk0.28                up                    up       --      
 [IPv6 Address/Prefix Length] 2001:db8:1::2/64  
+[IPv6 Address/Prefix Length] fe80::2a11:ecff:fe6b:916a/10
 GigabitEthernet0/7/5.2124    up                    up       --      
 [IPv6 Address/Prefix Length] 2001:db8:2::2/64  
 LoopBack0                    up                    up(s)    --      
@@ -972,6 +973,9 @@ ID   Name             Status          Description
     assert ("Eth-Trunk0.28", "2001:db8:1::2/64") in ips_map
     assert ("LoopBack0", "203.0.113.1/32") in ips_map
     assert ("LoopBack0", "2001:db8:3::1/128") in ips_map
+
+    # Garante que link-local fe80:: foi completamente ignorado
+    assert not any(ip['address'].lower().startswith('fe80') for ip in parsed['ips'])
 
 
 def test_huawei_fetch_data_with_specific_vs_matches_and_switches(monkeypatch):

@@ -205,10 +205,13 @@ def ipv4_to_cidr(address: str, mask: Optional[str] = None) -> Optional[str]:
 
 
 def ipv6_to_cidr(address: str, prefix: Optional[str] = None) -> Optional[str]:
-    """Converte endereco IPv6 do VRP em notacao CIDR."""
+    """Converte endereco IPv6 do VRP em notacao CIDR (ignora link-local fe80::/10)."""
     try:
         value = f"{address}/{prefix}" if prefix else address
-        return str(ipaddress.IPv6Interface(value))
+        iface = ipaddress.IPv6Interface(value)
+        if iface.ip.is_link_local or str(iface.ip).lower().startswith('fe80'):
+            return None
+        return str(iface)
     except Exception:
         return None
 
@@ -486,10 +489,11 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             if ip_token and ip_token.lower() != 'unassigned':
                 try:
                     cidr_obj = ipaddress.ip_interface(ip_token)
-                    cidr_str = str(cidr_obj)
-                    if (if_name, cidr_str) not in existing_ips:
-                        data['ips'].append({'interface': if_name, 'address': cidr_str})
-                        existing_ips.add((if_name, cidr_str))
+                    if not getattr(cidr_obj.ip, 'is_link_local', False) and not str(cidr_obj.ip).lower().startswith('fe80'):
+                        cidr_str = str(cidr_obj)
+                        if (if_name, cidr_str) not in existing_ips:
+                            data['ips'].append({'interface': if_name, 'address': cidr_str})
+                            existing_ips.add((if_name, cidr_str))
                 except Exception:
                     pass
 
@@ -511,10 +515,12 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                     if m_ip:
                         candidate = m_ip.group(1)
                         try:
-                            cidr_str = str(ipaddress.IPv6Interface(candidate))
-                            if (current_iface, cidr_str) not in existing_ips:
-                                data['ips'].append({'interface': current_iface, 'address': cidr_str})
-                                existing_ips.add((current_iface, cidr_str))
+                            ip_obj = ipaddress.IPv6Interface(candidate)
+                            if not ip_obj.ip.is_link_local and not str(ip_obj.ip).lower().startswith('fe80'):
+                                cidr_str = str(ip_obj)
+                                if (current_iface, cidr_str) not in existing_ips:
+                                    data['ips'].append({'interface': current_iface, 'address': cidr_str})
+                                    existing_ips.add((current_iface, cidr_str))
                         except Exception:
                             pass
                 continue
@@ -529,10 +535,12 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                     if m_ip:
                         candidate = m_ip.group(1)
                         try:
-                            cidr_str = str(ipaddress.IPv6Interface(candidate))
-                            if (current_iface, cidr_str) not in existing_ips:
-                                data['ips'].append({'interface': current_iface, 'address': cidr_str})
-                                existing_ips.add((current_iface, cidr_str))
+                            ip_obj = ipaddress.IPv6Interface(candidate)
+                            if not ip_obj.ip.is_link_local and not str(ip_obj.ip).lower().startswith('fe80'):
+                                cidr_str = str(ip_obj)
+                                if (current_iface, cidr_str) not in existing_ips:
+                                    data['ips'].append({'interface': current_iface, 'address': cidr_str})
+                                    existing_ips.add((current_iface, cidr_str))
                         except Exception:
                             pass
                 continue
@@ -605,10 +613,12 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             for p in parts[1:]:
                 if '/' in p and ':' in p:
                     try:
-                        cidr_str = str(ipaddress.IPv6Interface(p))
-                        if (clean_if, cidr_str) not in existing_ips:
-                            data['ips'].append({'interface': clean_if, 'address': cidr_str})
-                            existing_ips.add((clean_if, cidr_str))
+                        ip_obj = ipaddress.IPv6Interface(p)
+                        if not ip_obj.ip.is_link_local and not str(ip_obj.ip).lower().startswith('fe80'):
+                            cidr_str = str(ip_obj)
+                            if (clean_if, cidr_str) not in existing_ips:
+                                data['ips'].append({'interface': clean_if, 'address': cidr_str})
+                                existing_ips.add((clean_if, cidr_str))
                     except Exception:
                         pass
 

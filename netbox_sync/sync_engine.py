@@ -1290,9 +1290,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     ip_iface_obj = ipaddress.ip_interface(raw_ip_str)
                     canonical_ip_str = str(ip_iface_obj)
                     clean_host_ip = str(ip_iface_obj.ip)
+                    is_link_local = getattr(ip_iface_obj.ip, 'is_link_local', False)
                 except Exception:
                     canonical_ip_str = raw_ip_str
                     clean_host_ip = raw_ip_str.split('/')[0]
+                    is_link_local = clean_host_ip.lower().startswith('fe80')
+
+                # Ignora endereços IPv6 Link-Local (fe80::/10)
+                if is_link_local or clean_host_ip.lower().startswith('fe80'):
+                    continue
 
                 # Se for Network ID (ex: 2001:db8:1::/64 ou 10.0.0.0/24), não deve ser atribuído à interface
                 if canonical_ip_str.endswith('::/64') or canonical_ip_str.endswith('.0/24') or raw_ip_str.endswith('::/64') or raw_ip_str.endswith('.0/24'):
