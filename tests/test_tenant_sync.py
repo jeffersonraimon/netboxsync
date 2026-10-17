@@ -196,3 +196,62 @@ def test_sync_to_netbox_applies_custom_vrf(mock_pynetbox_api):
     assert ip_create_call is not None
     assert ip_create_call.kwargs.get('vrf') == 55
 
+
+@patch("pynetbox.api")
+def test_sync_to_netbox_creates_vdc(mock_pynetbox_api):
+    mock_nb = MagicMock()
+    mock_pynetbox_api.return_value = mock_nb
+
+    mock_device = MagicMock(id=100, comments="")
+    mock_device.name = "NE8000-TEST"
+    mock_nb.dcim.devices.filter.return_value = [mock_device]
+
+    # VDC mock
+    mock_nb.dcim.virtual_device_contexts.filter.return_value = []
+    created_vdc = MagicMock(id=77, name="NE8000-TEST-BRAS01")
+    mock_nb.dcim.virtual_device_contexts.create.return_value = created_vdc
+
+    # Interface mock (não existe, será criada com VDC)
+    mock_nb.dcim.interfaces.filter.return_value = []
+    created_iface = MagicMock(id=201)
+    created_iface.name = "100GE0/1/0"
+    mock_nb.dcim.interfaces.create.return_value = created_iface
+
+    data = {
+        'hostname': 'NE8000-TEST',
+        'serial': 'SN99999',
+        'model': 'NetEngine 8000',
+        'tags': set(),
+        'logical_systems': {'BRAS01': ['100GE0/1/0']},
+        'vlans': {},
+        'interfaces_physical': [{'name': '100GE0/1/0', 'description': 'UPLINK', 'enabled': True, 'vdc': 'NE8000-TEST-BRAS01'}],
+        'interfaces_l3': [],
+        'lags': [],
+        'ips': [],
+        'vpws': [],
+        'vpls': [],
+        'interface_vlans': {},
+        'interface_untagged_vlans': {},
+        'vrrp_groups': [],
+        'lldp_neighbors': []
+    }
+
+    sync_to_netbox(
+        data,
+        url="http://netbox.local",
+        token="test_token",
+        sync_modules=['interfaces']
+    )
+
+    # Verifica que o VDC foi criado com sucesso
+    vdc_create_call = mock_nb.dcim.virtual_device_contexts.create.call_args
+    assert vdc_create_call is not None
+    assert vdc_create_call.kwargs.get('name') == 'NE8000-TEST-BRAS01'
+    assert vdc_create_call.kwargs.get('device') == 100
+
+    # Verifica que a interface recebeu o VDC
+    iface_create_call = mock_nb.dcim.interfaces.create.call_args
+    assert iface_create_call is not None
+    assert iface_create_call.kwargs.get('vdcs') == [77] or iface_create_call.kwargs.get('vdc') == 77
+
+

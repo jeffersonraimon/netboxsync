@@ -690,25 +690,37 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
     device_id = getattr(device, 'id', getattr(device, 'pk', None))
 
-    # 3.5. Sincronizar Virtual Device Contexts (VDCs / Logical Systems)
+    # 3.5. Sincronizar Virtual Device Contexts (VDCs / Logical Systems / Virtual Systems)
     vdcs_cache = {}
     logical_systems = data.get('logical_systems', {})
     if logical_systems:
         for ls_name in logical_systems.keys():
-            vdc_name = f"{hostname}-{ls_name}"
+            vdc_name = ls_name if ls_name.startswith(f"{hostname}-") else f"{hostname}-{ls_name}"
             vdc_obj = safe_get(nb.dcim.virtual_device_contexts, name=vdc_name, device_id=device_id)
             if not vdc_obj:
                 print(f"[+] Criando Virtual Device Context '{vdc_name}' no NetBox para {hostname}...")
                 try:
-                    vdc_obj = nb.dcim.virtual_device_contexts.create(
-                        name=vdc_name,
-                        device=device_id,
-                        status='active'
-                    )
+                    create_payload = {
+                        'name': vdc_name,
+                        'device': device_id,
+                        'status': 'active'
+                    }
+                    if tenant_id:
+                        create_payload['tenant'] = tenant_id
+                    vdc_obj = nb.dcim.virtual_device_contexts.create(**create_payload)
                 except Exception as vdc_err:
-                    print(f"[!] Erro ao criar VDC '{vdc_name}': {vdc_err}")
+                    try:
+                        vdc_obj = nb.dcim.virtual_device_contexts.create(
+                            name=vdc_name,
+                            device=device_id,
+                            status='active'
+                        )
+                    except Exception:
+                        print(f"[!] Erro ao criar VDC '{vdc_name}': {vdc_err}")
             if vdc_obj:
                 vdcs_cache[vdc_name] = getattr(vdc_obj, 'id', getattr(vdc_obj, 'pk', None))
+                # Também indexa pelo nome simples do VS/LS para facilitar lookup
+                vdcs_cache[ls_name] = getattr(vdc_obj, 'id', getattr(vdc_obj, 'pk', None))
 
     # 4. Garantir criação das VLAN Roles no NetBox
     vlan_roles_cache = {}

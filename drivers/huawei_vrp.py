@@ -50,6 +50,7 @@ DEFAULT_COMMANDS = {
     'version': 'display version',
     'esn': 'display esn',
     'device': 'display device',
+    'vs': 'display virtual-system',
     'lldp': 'display lldp neighbor brief',
     'phy_option': 'display interface phy-option | no-more',
     'transceiver': 'display transceiver | no-more',
@@ -62,6 +63,7 @@ VRP_PROMPT_REGEX = r'[\r\n](?:<[^<>\r\n]+>|\[~?[^\[\]\r\n]+\])[ \t]*$'
 _PHYSICAL_PREFIXES = (
     'gigabitethernet', 'xgigabitethernet', 'ethernet', 'meth',
     '10ge', '25ge', '40ge', '100ge', '200ge', '400ge',
+    '50ge', 'ge', 'xge', 'flexe', 'pos',
 )
 
 # Prefixos de interface logica (virtual)
@@ -88,7 +90,7 @@ def clean_config(text: str) -> str:
         if not stripped:
             lines.append(line)
             continue
-        if stripped.startswith('---- More ----') or stripped.startswith('---- more ----'):
+        if re.search(r'---- More|--More--|-- More --|---\(more', stripped, re.IGNORECASE):
             continue
         if re.match(r'^[<\[]~?[\w\.\-]+[>\]]\s*$', stripped):
             # linha de eco do prompt isolada (ex: <SW-CORE>)
@@ -197,6 +199,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         Conecta via SSH e coleta os comandos de leitura do VRP.
         """
         commands = kwargs.get('commands') or DEFAULT_COMMANDS
+        vs_name = kwargs.get('vs') or kwargs.get('virtual_system')
 
         session = SSHClientSession(host=host, username=username, password=password, port=port, debug=debug)
         outputs: Dict[str, Any] = {}
@@ -206,13 +209,42 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             # Desabilita a paginacao interativa ("---- More ----") do VRP
             session.send_command("screen-length 0 temporary", timeout=10)
 
-            for key, command in commands.items():
-                # 'display current-configuration' em chassi grande pode demorar
-                cmd_timeout = 240 if 'current-configuration' in command else 90
-                print(f"  [➔] Executando comando: {command}")
-                buf = session.send_command(command, expect_regex=VRP_PROMPT_REGEX, timeout=cmd_timeout)
-                if buf:
-                    outputs[key] = buf
+            # Se o usuario especificou um Virtual System (VS) para entrar a partir do Admin-VS
+            if vs_name:
+                print(f"  [➔] Alternando para Virtual System (VS): '{vs_name}'...")
+                session.send_command(f"switch virtual-system {vs_name}", expect_regex=VRP_PROMPT_REGEX, timeout=15)
+                session.send_command("screen-length 0 temporary", timeout=10)
+                for key, command in commands.items():
+                    cmd_timeout = 240 if 'current-configuration' in command else 90
+                    print(f"  [➔] Executando comando: {command}")
+                    buf = session.send_command(command, expect_regex=VRP_PROMPT_REGEX, timeout=cmd_timeout)
+                    if buf:
+                        outputs[key] = buf
+            else:
+                for key, command in commands.items():
+                    cmd_timeout = 240 if 'current-configuration' in command else 90
+                    print(f"  [➔] Executando comando: {command}")
+                    buf = session.send_command(command, expect_regex=VRP_PROMPT_REGEX, timeout=cmd_timeout)
+                    if buf:
+                        outputs[key] = buf
+
+                # Verifica se o equipamento possui Virtual Systems configurados (modo Admin-VS)
+                vs_check = outputs.get('vs') or session.send_command("display virtual-system", expect_regex=VRP_PROMPT_REGEX, timeout=10)
+                if vs_check:
+                    outputs['vs'] = vs_check
+                    if "virtual-system" in vs_check.lower():
+                        vs_matches = re.findall(r'^\s*\d+\s+([A-Za-z0-9_\.\-]+)', vs_check, re.MULTILINE)
+                        service_vss = [v for v in vs_matches if v.lower() not in ('public', 'admin-vs', 'admin')]
+                        if service_vss:
+                            print(f"  [!] Detectado chassi com Virtual Systems (VS) ativos: {service_vss}")
+                            for svs in service_vss:
+                                print(f"  [➔] Coletando configurações do Virtual System: '{svs}'...")
+                                session.send_command(f"switch virtual-system {svs}", expect_regex=VRP_PROMPT_REGEX, timeout=15)
+                                session.send_command("screen-length 0 temporary", timeout=10)
+                                svs_cfg = session.send_command("display current-configuration", expect_regex=VRP_PROMPT_REGEX, timeout=240)
+                                if svs_cfg:
+                                    outputs[f'config_vs_{svs}'] = svs_cfg
+                                session.send_command("quit", expect_regex=VRP_PROMPT_REGEX, timeout=10)
         finally:
             session.close()
 
@@ -239,6 +271,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             'serial': None,
             'model': None,
             'tags': set(),
+            'logical_systems': {},             # vs_name -> [if_names] (VDCs)
             'vlans': {},                       # vid -> name
             'interfaces_physical': [],         # [{'name','description','enabled','mtu','speed'}]
             'interfaces_l3': [],               # [{'name','vlan','parent', ...}]
@@ -256,8 +289,31 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             'vpn_tunnels': []
         }
 
-        if not config_text:
-            return data
+        # ------------------------------------------------------------------
+        # 1. Hostname (sysname)
+        # ------------------------------------------------------------------
+        data['hostname'] = first_match(config_text, r'^\s*sysname\s+(\S+)') or \
+            first_match(config_raw, r'^[<\[]~?([\w\.\-]+)[>\]]')
+
+        # ------------------------------------------------------------------
+        # 2. Modelo e numero de serie
+        # ------------------------------------------------------------------
+        search_sources = [device_text, version_text, config_text]
+        for source in search_sources:
+            model = first_match(source, r'^#+[ \t]*(.+?)[ \t]+version information:') or \
+                first_match(source, r"^#+[ \t]*(.+?)'s Device status")
+            if model:
+                data['model'] = model
+                break
+        if not data['model']:
+            data['model'] = first_match(version_text, r'HUAWEI\s+(\S.*?)\s+(?:Router|Switch|Routing Switch)\s+uptime',
+                                        re.MULTILINE | re.IGNORECASE) or \
+                first_match(version_text or config_text,
+                            r'VRP \(R\) software, Version [\d.]+ \(([A-Za-z0-9\- ]+?)\s+V\d{3}R')
+
+        data['serial'] = first_match(esn_text, r'ESN of (?:slot\s+\d+|master|standby|\S+)\s*:\s*(\S+)', re.MULTILINE | re.IGNORECASE) or \
+            first_match(esn_text, r'^\s*(?:Board\s+)?ESN\s*:\s*(\S+)', re.MULTILINE | re.IGNORECASE) or \
+            first_match(device_text, r'Board\s+Serial\s+Number\s*:\s*(\S+)', re.MULTILINE | re.IGNORECASE)
 
         vlan_roles_map = data['vlan_roles_map']
 
@@ -295,238 +351,284 @@ class HuaweiVRPDriver(BaseDeviceDriver):
             used_names.add(name.lower())
             return name
 
-        # ------------------------------------------------------------------
-        # 1. Hostname (sysname)
-        # ------------------------------------------------------------------
-        data['hostname'] = first_match(config_text, r'^\s*sysname\s+(\S+)') or \
-            first_match(config_raw, r'^[<\[]~?([\w\.\-]+)[>\]]')
-
-        # ------------------------------------------------------------------
-        # 2. Modelo e numero de serie
-        # ------------------------------------------------------------------
-        search_sources = [device_text, version_text, config_text]
-        for source in search_sources:
-            model = first_match(source, r'^#+[ \t]*(.+?)[ \t]+version information:') or \
-                first_match(source, r"^#+[ \t]*(.+?)'s Device status")
-            if model:
-                data['model'] = model
-                break
-        if not data['model']:
-            data['model'] = first_match(version_text, r'HUAWEI\s+(\S.*?)\s+(?:Router|Switch|Routing Switch)\s+uptime',
-                                        re.MULTILINE | re.IGNORECASE) or \
-                first_match(version_text or config_text,
-                            r'VRP \(R\) software, Version [\d.]+ \(([A-Za-z0-9\- ]+?)\s+V\d{3}R')
-
-        data['serial'] = first_match(esn_text, r'ESN of slot\s+\d+\s*:\s*(\S+)', re.MULTILINE | re.IGNORECASE) or \
-            first_match(esn_text, r'^\s*(?:Board\s+)?ESN\s*:\s*(\S+)', re.MULTILINE | re.IGNORECASE) or \
-            first_match(device_text, r'Board\s+Serial\s+Number\s*:\s*(\S+)', re.MULTILINE | re.IGNORECASE)
-
-        # ------------------------------------------------------------------
-        # 3. Tags de protocolo
-        # ------------------------------------------------------------------
-        if re.search(r'^\s*ospfv3\s+\d+', config_text, re.MULTILINE):
-            data['tags'].add('OSPFv3')
-        if re.search(r'^\s*ospf\s+\d+', config_text, re.MULTILINE):
-            data['tags'].add('OSPF')
-        if re.search(r'^\s*isis\s+\d+', config_text, re.MULTILINE):
-            data['tags'].add('ISIS')
-        if re.search(r'^\s*bgp\s+\d+', config_text, re.MULTILINE):
-            data['tags'].add('BGP')
-        if re.search(r'^\s*mpls ldp\b', config_text, re.MULTILINE):
-            data['tags'].add('LDP')
-        if re.search(r'^\s*mpls rsvp-te\b', config_text, re.MULTILINE):
-            data['tags'].add('RSVP')
-        if re.search(r'^\s*mpls l2vc\b', config_text, re.MULTILINE) or \
-           re.search(r'^\s*vsi\s+\S+', config_text, re.MULTILINE) or \
-           re.search(r'^\s*l2 binding vsi\b', config_text, re.MULTILINE):
-            data['tags'].add('MPLS-L2VPN')
-        if re.search(r'^\s*vrrp vrid\s+\d+', config_text, re.MULTILINE):
-            data['tags'].add('VRRP')
-        if re.search(r'pppoe-server|^\s*bas\b', config_text, re.MULTILINE | re.IGNORECASE):
-            data['tags'].add('PPPoE')
-
-        # ------------------------------------------------------------------
-        # 4. VLANs ('vlan batch' e blocos 'vlan N' com 'description')
-        # ------------------------------------------------------------------
-        for match in re.finditer(r'^\s*vlan batch\s+(.+)$', config_text, re.MULTILINE):
-            for vid in parse_vlan_list(match.group(1)):
-                register_vlan(vid)
-
-        vlan_block_re = re.compile(
-            r'^\s*vlan\s+(\d+)\s*\n(.*?)(?=^\s*(?:vlan\s+(?:\d+|batch)|#)|\Z)',
-            re.MULTILINE | re.DOTALL)
-        for match in vlan_block_re.finditer(config_text):
-            vid = int(match.group(1))
-            name = clean_description(first_match(match.group(2), r'^\s*description\s+(.+)$'))
-            data['vlans'][vid] = name or data['vlans'].get(vid) or f"VLAN-{vid}"
-
-        # ------------------------------------------------------------------
-        # 5. Interfaces (fisicas, LAGs, L3 e subinterfaces)
-        # ------------------------------------------------------------------
-        interface_re = re.compile(
-            r'^interface\s+(\S+)\s*\n(.*?)(?=^interface\s+\S+|^#\s*$|^return\s*$|\Z)',
-            re.MULTILINE | re.DOTALL)
-
         lag_entries: Dict[str, Dict[str, Any]] = {}
         lag_members: Dict[str, List[str]] = {}
         vsi_bindings: Dict[str, Dict[str, Any]] = {}
 
-        for match in interface_re.finditer(config_text):
-            if_name = match.group(1).strip()
-            body = match.group(2)
-            body_lines = [line.strip() for line in body.splitlines() if line.strip()]
+        def _parse_config_block(cfg_chunk: str, vdc_name: Optional[str] = None):
+            """Analisa um bloco de configuração (Admin-VS ou de um Virtual System específico)."""
+            if not cfg_chunk:
+                return
 
-            if if_name.lower().startswith('null'):
-                continue  # interface de descarte (NULL0) nao representa ativo
+            # Tags de protocolo
+            if re.search(r'^\s*ospfv3\s+\d+', cfg_chunk, re.MULTILINE):
+                data['tags'].add('OSPFv3')
+            if re.search(r'^\s*ospf\s+\d+', cfg_chunk, re.MULTILINE):
+                data['tags'].add('OSPF')
+            if re.search(r'^\s*isis\s+\d+', cfg_chunk, re.MULTILINE):
+                data['tags'].add('ISIS')
+            if re.search(r'^\s*bgp\s+\d+', cfg_chunk, re.MULTILINE):
+                data['tags'].add('BGP')
+            if re.search(r'^\s*mpls ldp\b', cfg_chunk, re.MULTILINE):
+                data['tags'].add('LDP')
+            if re.search(r'^\s*mpls rsvp-te\b', cfg_chunk, re.MULTILINE):
+                data['tags'].add('RSVP')
+            if re.search(r'^\s*mpls l2vc\b', cfg_chunk, re.MULTILINE) or \
+               re.search(r'^\s*vsi\s+\S+', cfg_chunk, re.MULTILINE) or \
+               re.search(r'^\s*l2 binding vsi\b', cfg_chunk, re.MULTILINE):
+                data['tags'].add('MPLS-L2VPN')
+            if re.search(r'^\s*vrrp vrid\s+\d+', cfg_chunk, re.MULTILINE):
+                data['tags'].add('VRRP')
+            if re.search(r'pppoe-server|^\s*bas\b', cfg_chunk, re.MULTILINE | re.IGNORECASE):
+                data['tags'].add('PPPoE')
 
-            desc = clean_description(first_match(body, r'^\s*description\s+(.+)$'))
-            enabled = 'shutdown' not in body_lines
-            mtu = first_match(body, r'^\s*mtu\s+(\d+)')
-            common = {
-                'name': if_name,
-                'description': desc,
-                'enabled': enabled,
-                'mtu': int(mtu) if mtu else None,
-            }
-
-            # --- Enderecos IP (mascara decimal -> CIDR) ---
-            for ip_match in re.finditer(r'^\s*ip address\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)', body, re.MULTILINE):
-                cidr = ipv4_to_cidr(ip_match.group(1), ip_match.group(2))
-                if cidr:
-                    data['ips'].append({'interface': if_name, 'address': cidr})
-            for ip6_match in re.finditer(r'^\s*ipv6 address\s+([0-9A-Fa-f:]{2,})\s*/\s*(\d{1,3})', body, re.MULTILINE):
-                cidr = ipv6_to_cidr(ip6_match.group(1), ip6_match.group(2))
-                if cidr:
-                    data['ips'].append({'interface': if_name, 'address': cidr})
-            for ip6_match in re.finditer(r'^\s*ipv6 address\s+([0-9A-Fa-f:]{2,})\s+(\d{1,3})\s*$', body, re.MULTILINE):
-                cidr = ipv6_to_cidr(ip6_match.group(1), ip6_match.group(2))
-                if cidr:
-                    data['ips'].append({'interface': if_name, 'address': cidr})
-
-            # --- VRRP ---
-            for vrrp_match in re.finditer(r'^\s*vrrp vrid\s+(\d+)\s+virtual-ip\s+(\S+)', body, re.MULTILINE):
-                vr_id = int(vrrp_match.group(1))
-                virtual_ip = vrrp_match.group(2)
-                priority = first_match(body, rf'^\s*vrrp vrid\s+{vr_id}\s+priority\s+(\d+)')
-                version = first_match(body, rf'^\s*vrrp vrid\s+{vr_id}\s+version\s+(\d)')
-                data['vrrp_groups'].append({
-                    'interface': if_name,
-                    'address_family': 'ipv6' if ':' in virtual_ip else 'ipv4',
-                    'vr_id': vr_id,
-                    'virtual_ip': virtual_ip,
-                    'priority': int(priority) if priority else 100,
-                    'version': f"v{version}" if version else 'v2',
-                })
-
-            # --- VLANs de acesso (access/trunk/hybrid) ---
-            tagged_vlans, untagged_vlans = set(), set()
-            pvid = first_match(body, r'^\s*port (?:default|hybrid pvid) vlan\s+(\d+)')
-            if pvid:
-                untagged_vlans.add(int(pvid))
-            for vlan_match in re.finditer(r'^\s*port (?:default|trunk allow-pass|hybrid tagged|hybrid untagged) vlan\s+(.+)$', body, re.MULTILINE):
-                line_vlans = set(parse_vlan_list(vlan_match.group(1)))
-                if 'hybrid untagged' in vlan_match.group(0):
-                    untagged_vlans.update(line_vlans)
-                else:
-                    tagged_vlans.update(line_vlans)
-            tagged_vlans -= untagged_vlans
-
-            # --- Classificacao da interface ---
-            if is_subinterface(if_name) or is_virtual_l3(if_name):
-                vid = vlanif_vid(if_name) or (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
-                l3_entry = dict(common)
-                l3_entry['vlan'] = str(vid) if vid else None
-                l3_entry['parent'] = iface_base(if_name) if is_subinterface(if_name) else None
-                data['interfaces_l3'].append(l3_entry)
-                if vid:
-                    register_vlan(vid, desc)
-                    add_iface_vlan(if_name, vid, vname=desc)
-            elif iface_base(if_name).lower().startswith('eth-trunk'):
-                lag_entry = dict(common)
-                lag_entry['members'] = []
-                lag_entries[if_name] = lag_entry
-            elif is_physical(if_name):
-                data['interfaces_physical'].append(common)
-                member_of = first_match(body, r'^\s*eth-trunk\s+(\d+)\s*$')
-                if member_of:
-                    lag_members.setdefault(f"Eth-Trunk{member_of}", []).append(if_name)
-
-            # --- Vinculo de porta a VLAN tagged/untagged ---
-            if tagged_vlans:
-                data['interface_vlans'].setdefault(if_name, set()).update(tagged_vlans)
-                for vid in tagged_vlans:
-                    register_vlan(vid)
-            if untagged_vlans:
-                data['interface_untagged_vlans'][if_name] = int(pvid) if pvid else sorted(untagged_vlans)[0]
-                for vid in untagged_vlans:
+            # VLANs ('vlan batch' e blocos 'vlan N' com 'description')
+            for match in re.finditer(r'^\s*vlan batch\s+(.+)$', cfg_chunk, re.MULTILINE):
+                for vid in parse_vlan_list(match.group(1)):
                     register_vlan(vid)
 
-            # --- VPWS: mpls l2vc <peer> <vc-id> ---
-            for vc_match in re.finditer(r'^\s*mpls l2vc\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)', body, re.MULTILINE):
-                neighbor, vc_id = vc_match.group(1), int(vc_match.group(2))
-                vid = vlanif_vid(if_name) or \
-                    (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
-                entry_name = unique_name(desc, if_name)
-                if vid:
-                    vlan_display_name = desc or entry_name
-                    register_vlan(vid, vlan_display_name)
-                    vlan_roles_map[vid] = "VPWS-TUNEIS"
-                    add_iface_vlan(if_name, vid, vname=vlan_display_name)
-                data['vpws'].append({
-                    'name': entry_name,
-                    'group': '',
-                    'vpn': str(vc_id),
-                    'pw_id': str(vc_id),
-                    'neighbor': neighbor,
-                    'interface': if_name,
-                    'interfaces': [if_name],
-                    'vlan_id': vid,
+            vlan_block_re = re.compile(
+                r'^\s*vlan\s+(\d+)\s*\n(.*?)(?=^\s*(?:vlan\s+(?:\d+|batch)|#)|\Z)',
+                re.MULTILINE | re.DOTALL)
+            for match in vlan_block_re.finditer(cfg_chunk):
+                vid = int(match.group(1))
+                name = clean_description(first_match(match.group(2), r'^\s*description\s+(.+)$'))
+                data['vlans'][vid] = name or data['vlans'].get(vid) or f"VLAN-{vid}"
+
+            # Interfaces (fisicas, LAGs, L3 e subinterfaces)
+            interface_re = re.compile(
+                r'^interface\s+(\S+)\s*\n(.*?)(?=^interface\s+\S+|^#\s*$|^return\s*$|\Z)',
+                re.MULTILINE | re.DOTALL)
+
+            for match in interface_re.finditer(cfg_chunk):
+                if_name = match.group(1).strip()
+                body = match.group(2)
+                body_lines = [line.strip() for line in body.splitlines() if line.strip()]
+
+                if if_name.lower().startswith('null'):
+                    continue
+
+                desc = clean_description(first_match(body, r'^\s*description\s+(.+)$'))
+                enabled = 'shutdown' not in body_lines
+                mtu = first_match(body, r'^\s*mtu\s+(\d+)')
+                common = {
+                    'name': if_name,
                     'description': desc,
-                })
+                    'enabled': enabled,
+                    'mtu': int(mtu) if mtu else None,
+                }
+                if vdc_name:
+                    common['vdc'] = vdc_name
 
-            # --- VPLS: l2 binding vsi <NOME> ---
-            for vsi_match in re.finditer(r'^\s*l2 binding vsi\s+(\S+)', body, re.MULTILINE):
-                vsi_name = vsi_match.group(1)
-                vid = vlanif_vid(if_name) or \
-                    (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
-                binding = vsi_bindings.setdefault(vsi_name, {'vlan_id': None, 'interfaces': [], 'descriptions': {}})
-                if vid and not binding['vlan_id']:
-                    binding['vlan_id'] = vid
-                if if_name not in binding['interfaces']:
-                    binding['interfaces'].append(if_name)
-                if desc:
-                    binding['descriptions'][if_name] = desc
+                # Enderecos IP
+                for ip_match in re.finditer(r'^\s*ip address\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)', body, re.MULTILINE):
+                    cidr = ipv4_to_cidr(ip_match.group(1), ip_match.group(2))
+                    if cidr:
+                        data['ips'].append({'interface': if_name, 'address': cidr})
+                for ip6_match in re.finditer(r'^\s*ipv6 address\s+([0-9A-Fa-f:]{2,})\s*/\s*(\d{1,3})', body, re.MULTILINE):
+                    cidr = ipv6_to_cidr(ip6_match.group(1), ip6_match.group(2))
+                    if cidr:
+                        data['ips'].append({'interface': if_name, 'address': cidr})
+                for ip6_match in re.finditer(r'^\s*ipv6 address\s+([0-9A-Fa-f:]{2,})\s+(\d{1,3})\s*$', body, re.MULTILINE):
+                    cidr = ipv6_to_cidr(ip6_match.group(1), ip6_match.group(2))
+                    if cidr:
+                        data['ips'].append({'interface': if_name, 'address': cidr})
 
-            # --- BNG/BRAS: user-vlan <ini> <fim> [qinq <svlan>] ---
-            for uv_match in re.finditer(r'^\s*user-vlan\s+(\d+)\s+(\d+)(?:\s+qinq\s+(\d+))?', body, re.MULTILINE):
-                first_vid, last_vid = int(uv_match.group(1)), int(uv_match.group(2))
-                svlan = int(uv_match.group(3)) if uv_match.group(3) else None
-                customer_vlans = list(range(min(first_vid, last_vid), max(first_vid, last_vid) + 1))
-                entry_name = unique_name(desc, if_name)
-                if svlan:
-                    vlan_display_name = desc or entry_name
-                    register_vlan(svlan, vlan_display_name)
-                    vlan_roles_map[svlan] = "VPLS-TUNEIS"
-                    add_iface_vlan(if_name, svlan, vname=vlan_display_name)
-                for cvid in customer_vlans:
-                    cv_name = f"{entry_name}-Customer-{cvid}" if entry_name else f"VLAN-{cvid}"
-                    register_vlan(cvid, cv_name)
-                    vlan_roles_map[cvid] = "VPLS-TUNEIS"
+                # VRRP
+                for vrrp_match in re.finditer(r'^\s*vrrp vrid\s+(\d+)\s+virtual-ip\s+(\S+)', body, re.MULTILINE):
+                    vr_id = int(vrrp_match.group(1))
+                    virtual_ip = vrrp_match.group(2)
+                    priority = first_match(body, rf'^\s*vrrp vrid\s+{vr_id}\s+priority\s+(\d+)')
+                    version = first_match(body, rf'^\s*vrrp vrid\s+{vr_id}\s+version\s+(\d)')
+                    data['vrrp_groups'].append({
+                        'interface': if_name,
+                        'address_family': 'ipv6' if ':' in virtual_ip else 'ipv4',
+                        'vr_id': vr_id,
+                        'virtual_ip': virtual_ip,
+                        'priority': int(priority) if priority else 100,
+                        'version': f"v{version}" if version else 'v2',
+                    })
+
+                # VLANs de acesso (access/trunk/hybrid)
+                tagged_vlans, untagged_vlans = set(), set()
+                pvid = first_match(body, r'^\s*port (?:default|hybrid pvid) vlan\s+(\d+)')
+                if pvid:
+                    untagged_vlans.add(int(pvid))
+                for vlan_match in re.finditer(r'^\s*port (?:default|trunk allow-pass|hybrid tagged|hybrid untagged) vlan\s+(.+)$', body, re.MULTILINE):
+                    line_vlans = set(parse_vlan_list(vlan_match.group(1)))
+                    if 'hybrid untagged' in vlan_match.group(0):
+                        untagged_vlans.update(line_vlans)
+                    else:
+                        tagged_vlans.update(line_vlans)
+                tagged_vlans -= untagged_vlans
+
+                # Classificacao da interface
+                if is_subinterface(if_name) or is_virtual_l3(if_name):
+                    vid = vlanif_vid(if_name) or (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
+                    l3_entry = dict(common)
+                    l3_entry['vlan'] = str(vid) if vid else None
+                    l3_entry['parent'] = iface_base(if_name) if is_subinterface(if_name) else None
+                    data['interfaces_l3'].append(l3_entry)
+                    if vid:
+                        register_vlan(vid, desc)
+                        add_iface_vlan(if_name, vid, vname=desc)
+                elif iface_base(if_name).lower().startswith('eth-trunk'):
+                    lag_entry = dict(common)
+                    lag_entry['members'] = []
+                    lag_entries[if_name] = lag_entry
+                elif is_physical(if_name):
+                    data['interfaces_physical'].append(common)
+                    member_of = first_match(body, r'^\s*eth-trunk\s+(\d+)\s*$')
+                    if member_of:
+                        lag_members.setdefault(f"Eth-Trunk{member_of}", []).append(if_name)
+
+                # Vinculo de porta a VLAN tagged/untagged
+                if tagged_vlans:
+                    data['interface_vlans'].setdefault(if_name, set()).update(tagged_vlans)
+                    for vid in tagged_vlans:
+                        register_vlan(vid)
+                if untagged_vlans:
+                    data['interface_untagged_vlans'][if_name] = int(pvid) if pvid else sorted(untagged_vlans)[0]
+                    for vid in untagged_vlans:
+                        register_vlan(vid)
+
+                # VPWS: mpls l2vc <peer> <vc-id>
+                for vc_match in re.finditer(r'^\s*mpls l2vc\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)', body, re.MULTILINE):
+                    neighbor, vc_id = vc_match.group(1), int(vc_match.group(2))
+                    vid = vlanif_vid(if_name) or \
+                        (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
+                    entry_name = unique_name(desc, if_name)
+                    if vid:
+                        vlan_display_name = desc or entry_name
+                        register_vlan(vid, vlan_display_name)
+                        vlan_roles_map[vid] = "VPWS-TUNEIS"
+                        add_iface_vlan(if_name, vid, vname=vlan_display_name)
+                    data['vpws'].append({
+                        'name': entry_name,
+                        'group': '',
+                        'vpn': str(vc_id),
+                        'pw_id': str(vc_id),
+                        'neighbor': neighbor,
+                        'interface': if_name,
+                        'interfaces': [if_name],
+                        'vlan_id': vid,
+                        'description': desc,
+                    })
+
+                # VPLS: l2 binding vsi <NOME>
+                for vsi_match in re.finditer(r'^\s*l2 binding vsi\s+(\S+)', body, re.MULTILINE):
+                    vsi_name = vsi_match.group(1)
+                    vid = vlanif_vid(if_name) or \
+                        (parse_vlan_list(first_match(body, r'^\s*vlan-type dot1q\s+(.+)$') or '') or [None])[0]
+                    binding = vsi_bindings.setdefault(vsi_name, {'vlan_id': None, 'interfaces': [], 'descriptions': {}})
+                    if vid and not binding['vlan_id']:
+                        binding['vlan_id'] = vid
+                    if if_name not in binding['interfaces']:
+                        binding['interfaces'].append(if_name)
+                    if desc:
+                        binding['descriptions'][if_name] = desc
+
+                # BNG/BRAS: user-vlan <ini> <fim> [qinq <svlan>]
+                for uv_match in re.finditer(r'^\s*user-vlan\s+(\d+)\s+(\d+)(?:\s+qinq\s+(\d+))?', body, re.MULTILINE):
+                    first_vid, last_vid = int(uv_match.group(1)), int(uv_match.group(2))
+                    svlan = int(uv_match.group(3)) if uv_match.group(3) else None
+                    customer_vlans = list(range(min(first_vid, last_vid), max(first_vid, last_vid) + 1))
+                    entry_name = unique_name(desc, if_name)
+                    if svlan:
+                        vlan_display_name = desc or entry_name
+                        register_vlan(svlan, vlan_display_name)
+                        vlan_roles_map[svlan] = "VPLS-TUNEIS"
+                        add_iface_vlan(if_name, svlan, vname=vlan_display_name)
+                    for cvid in customer_vlans:
+                        cv_name = f"{entry_name}-Customer-{cvid}" if entry_name else f"VLAN-{cvid}"
+                        register_vlan(cvid, cv_name)
+                        vlan_roles_map[cvid] = "VPLS-TUNEIS"
+                    data['vpls'].append({
+                        'name': entry_name,
+                        'group': '',
+                        'vpn': str(svlan) if svlan else '',
+                        'vlan_id': svlan,
+                        'is_qinq': svlan is not None,
+                        'customer_vlans': customer_vlans,
+                        'neighbors': [],
+                        'interfaces': [if_name],
+                        'description': desc or 'BNG subscriber interface',
+                    })
+
+            # VPLS: blocos 'vsi <NOME>'
+            vsi_re = re.compile(r'^vsi\s+(\S+)(?:\s+\S+)?\s*\n(.*?)(?=^vsi\s+\S+|^#\s*$|^return\s*$|\Z)',
+                                re.MULTILINE | re.DOTALL)
+            for match in vsi_re.finditer(cfg_chunk):
+                vsi_name, body = match.group(1).strip(), match.group(2)
+                vsi_id = first_match(body, r'^\s*vsi-id\s+(\d+)')
+                peers = re.findall(r'^\s*peer\s+([\d\.]+)', body, re.MULTILINE)
+                desc = clean_description(first_match(body, r'^\s*description\s+(.+)$'))
+                binding = vsi_bindings.get(vsi_name, {})
+                vid = binding.get('vlan_id')
+                entry_name = vsi_name
+                used_names.add(entry_name.lower())
+                vsi_display_name = desc or entry_name
+                if vid:
+                    register_vlan(vid, vsi_display_name)
+                    vlan_roles_map[vid] = "VPLS-TUNEIS"
+                    for b_if in binding.get('interfaces', []):
+                        if_desc = binding.get('descriptions', {}).get(b_if) or vsi_display_name
+                        add_iface_vlan(b_if, vid, vname=if_desc)
                 data['vpls'].append({
                     'name': entry_name,
                     'group': '',
-                    'vpn': str(svlan) if svlan else '',
-                    'vlan_id': svlan,
-                    'is_qinq': svlan is not None,
-                    'customer_vlans': customer_vlans,
-                    'neighbors': [],
-                    'interfaces': [if_name],
-                    'description': desc or 'BNG subscriber interface',
+                    'vpn': vsi_id or '',
+                    'vlan_id': vid,
+                    'is_qinq': False,
+                    'customer_vlans': [],
+                    'neighbors': [(peer, vsi_id) for peer in peers if vsi_id],
+                    'interfaces': binding.get('interfaces', []),
+                    'description': desc,
                 })
 
+        # Processa configuração principal (Admin-VS / chassi)
+        if config_text:
+            _parse_config_block(config_text)
+
         # ------------------------------------------------------------------
-        # 6. LAGs (Eth-Trunk): blocos explicitos + membros + bases inferidas
+        # Virtual Systems (VS) / Virtual Device Contexts (VDC)
         # ------------------------------------------------------------------
+        logical_systems: Dict[str, List[str]] = {}
+        if config_text:
+            for vs_m in re.finditer(
+                r'^\s*virtual-system\s+([A-Za-z0-9_\.\-]+)\s*\n(.*?)(?=^\s*virtual-system\b|^#\s*$|^return|\Z)',
+                config_text,
+                re.MULTILINE | re.DOTALL
+            ):
+                vs_name = vs_m.group(1).strip()
+                if vs_name.lower() in ('public', 'admin-vs', 'admin'):
+                    continue
+                vs_body = vs_m.group(2)
+                assigned = []
+                for if_match in re.finditer(r'^\s*assign\s+interface\s+([A-Za-z0-9_\.\-\/ ]+)', vs_body, re.MULTILINE):
+                    norm_if = re.sub(r'\s+', '', if_match.group(1).strip())
+                    assigned.append(norm_if)
+                logical_systems.setdefault(vs_name, []).extend(assigned)
+
+        vs_output = self._get_output(raw_outputs, 'vs', 'display virtual-system', 'vs_text')
+        if vs_output:
+            for line in vs_output.splitlines():
+                m = re.match(r'^\s*\d+\s+([A-Za-z0-9_\.\-]+)\s+(?:Running|Down|Active|Inactive)\b', line, re.IGNORECASE)
+                if m:
+                    vs_name = m.group(1).strip()
+                    if vs_name.lower() not in ('public', 'admin-vs', 'admin'):
+                        logical_systems.setdefault(vs_name, [])
+
+        # Processa configurações coletadas de dentro de cada Virtual System (se houver)
+        if isinstance(raw_outputs, dict):
+            for k, v in raw_outputs.items():
+                if k.startswith('config_vs_') and v:
+                    vs_name = k[len('config_vs_'):]
+                    logical_systems.setdefault(vs_name, [])
+                    vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
+                    _parse_config_block(clean_config(v), vdc_name=vdc_name)
+
+        # Finaliza LAGs (Eth-Trunk)
         for lag_name, members in lag_members.items():
             lag_entries.setdefault(lag_name, {'name': lag_name, 'description': '', 'enabled': True, 'mtu': None, 'members': []})
             for member in members:
@@ -538,41 +640,58 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 lag_entries.setdefault(parent, {'name': parent, 'description': '', 'enabled': True, 'mtu': None, 'members': []})
         data['lags'] = list(lag_entries.values())
 
-        # ------------------------------------------------------------------
-        # 7. VPLS (blocos 'vsi <NOME> static' + pwsignal ldp)
-        # ------------------------------------------------------------------
-        vsi_re = re.compile(r'^vsi\s+(\S+)(?:\s+\S+)?\s*\n(.*?)(?=^vsi\s+\S+|^#\s*$|^return\s*$|\Z)',
-                            re.MULTILINE | re.DOTALL)
-        for match in vsi_re.finditer(config_text):
-            vsi_name, body = match.group(1).strip(), match.group(2)
-            vsi_id = first_match(body, r'^\s*vsi-id\s+(\d+)')
-            peers = re.findall(r'^\s*peer\s+([\d\.]+)', body, re.MULTILINE)
-            desc = clean_description(first_match(body, r'^\s*description\s+(.+)$'))
-            binding = vsi_bindings.get(vsi_name, {})
-            vid = binding.get('vlan_id')
-            entry_name = vsi_name
-            used_names.add(entry_name.lower())
-            vsi_display_name = desc or entry_name
-            if vid:
-                register_vlan(vid, vsi_display_name)
-                vlan_roles_map[vid] = "VPLS-TUNEIS"
-                for b_if in binding.get('interfaces', []):
-                    if_desc = binding.get('descriptions', {}).get(b_if) or vsi_display_name
-                    add_iface_vlan(b_if, vid, vname=if_desc)
-            data['vpls'].append({
-                'name': entry_name,
-                'group': '',
-                'vpn': vsi_id or '',
-                'vlan_id': vid,
-                'is_qinq': False,
-                'customer_vlans': [],
-                'neighbors': [(peer, vsi_id) for peer in peers if vsi_id],
-                'interfaces': binding.get('interfaces', []),
-                'description': desc,
-            })
+        # Vincula VDCs às interfaces associadas
+        if logical_systems:
+            for vs_name, ifaces in logical_systems.items():
+                vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
+                for if_name in ifaces:
+                    found = False
+                    for item in data['interfaces_physical'] + data['interfaces_l3'] + data['lags']:
+                        if item['name'] == if_name:
+                            item['vdc'] = vdc_name
+                            found = True
+                            break
+                    if not found:
+                        if is_subinterface(if_name) or is_virtual_l3(if_name):
+                            data['interfaces_l3'].append({
+                                'name': if_name,
+                                'description': f"Assigned to {vs_name}",
+                                'enabled': True,
+                                'mtu': None,
+                                'vlan': str(vlanif_vid(if_name) or 0),
+                                'parent': iface_base(if_name) if is_subinterface(if_name) else None,
+                                'vdc': vdc_name
+                            })
+                        elif iface_base(if_name).lower().startswith('eth-trunk'):
+                            data['lags'].append({
+                                'name': if_name,
+                                'description': f"Assigned to {vs_name}",
+                                'enabled': True,
+                                'mtu': None,
+                                'members': [],
+                                'vdc': vdc_name
+                            })
+                        else:
+                            data['interfaces_physical'].append({
+                                'name': if_name,
+                                'description': f"Assigned to {vs_name}",
+                                'enabled': True,
+                                'mtu': None,
+                                'vdc': vdc_name
+                            })
+
+            for vs_name in list(logical_systems.keys()):
+                vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
+                vdc_ifaces = [
+                    item['name'] for item in (data['interfaces_physical'] + data['interfaces_l3'] + data['lags'])
+                    if item.get('vdc') in (vdc_name, vs_name)
+                ]
+                logical_systems[vs_name] = sorted(list(set(logical_systems[vs_name] + vdc_ifaces)))
+
+        data['logical_systems'] = logical_systems
 
         # ------------------------------------------------------------------
-        # 8. Roles de VLAN para interfaces L3 (PTP) quando ainda nao classificadas
+        # Roles de VLAN para interfaces L3 (PTP) quando ainda nao classificadas
         # ------------------------------------------------------------------
         for l3_entry in data['interfaces_l3']:
             vid = vlanif_vid(l3_entry['name'])
@@ -580,18 +699,31 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 vlan_roles_map[vid] = "PTP-EQUIPAMENTOS"
 
         # ------------------------------------------------------------------
-        # 9. Vizinhos LLDP (display lldp neighbor brief)
+        # Vizinhos LLDP (display lldp neighbor brief)
         # ------------------------------------------------------------------
         if lldp_text:
             data['lldp_neighbors'] = self._parse_lldp_neighbors(lldp_text)
 
         # ------------------------------------------------------------------
-        # 10. Inventory Items / Transceivers (Router & Switch)
+        # Inventory Items / Transceivers (Router & Switch)
         # ------------------------------------------------------------------
         if phy_option_text:
             data['inventory_items'].extend(self._parse_transceivers_router(phy_option_text))
         if transceiver_text:
             data['inventory_items'].extend(self._parse_transceivers_switch(transceiver_text))
+
+        # Garante que portas físicas com ópticos estejam na lista de interfaces físicas
+        existing_phys = {i['name'] for i in data['interfaces_physical']}
+        for inv in data['inventory_items']:
+            inv_iface = inv.get('interface')
+            if inv_iface and inv_iface not in existing_phys and is_physical(inv_iface):
+                data['interfaces_physical'].append({
+                    'name': inv_iface,
+                    'description': '',
+                    'enabled': True,
+                    'mtu': None,
+                })
+                existing_phys.add(inv_iface)
 
         return data
 

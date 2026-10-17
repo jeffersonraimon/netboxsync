@@ -152,6 +152,7 @@ netboxsync/
 | `--device-type` | `-m`, `--model` | Modelo / Device Type no NetBox. | Coleta automática |
 | `--tenant` | `-t` | Nome/Slug do Tenant (Cliente) para vincular aos objetos criados no NetBox. | `.env` (`NETBOX_TENANT`) |
 | `--vrf` | - | Nome da VRF no NetBox para vincular os endereços IP. | `VRF-Global` / `.env` (`VRF_NAME`) |
+| `--vs` | `--virtual-system` | Nome do Virtual System (VS) para alternar a partir do Admin-VS no Huawei. | - |
 | `--insecure` | `-k` | Ignora a verificação de certificado SSL (auto-assinado). | `False` |
 | `--dry-run` | - | Executa a simulação sem realizar alterações no NetBox. | `False` |
 | `--sync-modules` | `-m-sync` | Módulos a sincronizar (`vlans`, `interfaces`, `ips`, `vrrp`, `l2vpn`, `cables`, `transceivers`, `vpn_tunnels`) ou `all`. | `all` |
@@ -203,39 +204,30 @@ python3 main.py --host 10.0.0.1 -u admin -p 'MinhaSenha' --driver huawei_vrp \
 > equipamento (ex: `NetEngine 8000 M8`, `S5731-H48T4XC`), pois o arquivo de
 > `display current-configuration` não contém o modelo de hardware do chassi.
 
-### 8. Sincronizar equipamento vinculando a um Tenant (Cliente)
+### 8. Sincronizar equipamento vinculando a um Tenant (Cliente) e VRF
 ```bash
-python3 main.py --host 10.10.10.1 -P 22002 --driver routeros --device-type "CCR1036-8G-2S+" --tenant "CLIENTE-X"
+python3 main.py --host 10.10.10.1 -P 22002 --driver routeros --device-type "CCR1036-8G-2S+" --tenant "CLIENTE-X" --vrf "CLIENTE-Y"
+```
+
+### 9. Sincronizar Huawei NetEngine 8000 dentro de um Virtual System (VS)
+Em equipamentos particionados com Virtual Systems (Admin-VS vs Service-VS), utilize `--vs`:
+```bash
+python3 main.py --host 192.0.2.1 -P 10223 --driver huawei_vrp --device-type "NE8000-M8" --vs "BRAS01" --tenant "CLIENTE-X" --vrf "CLIENTE-X"
 ```
 
 ---
 
 ## 🇨🇳 Notas do Driver Huawei VRP (`huawei_vrp`)
 
-- **Coleta SSH**: `display current-configuration`, `display version`, `display esn`,
-  `display device` e `display lldp neighbor brief` (paginação desabilitada com
-  `screen-length 0 temporary`). O parser também aceita apenas o arquivo local com a
-  saída de `display current-configuration`.
-- **Interfaces**: portas físicas (`GigabitEthernet`, `XGigabitEthernet`, `10GE`,
-  `25GE`, `40GE`, `100GE`, `MEth`) vão para interfaces físicas; `Vlanif`, `LoopBack`,
-  `Tunnel`, `Virtual-Template`, `Virtual-Ethernet` e subinterfaces (`Eth-Trunk4.2`)
-  vão para interfaces L3, com o vínculo de `parent` (ex: `Eth-Trunk4.2` → `Eth-Trunk4`).
-- **LAGs**: os `Eth-Trunk` são mapeados como LAG e os membros são descobertos pelo
-  comando `eth-trunk N` presente nas portas físicas.
-- **VLANs**: `vlan batch` (aceita faixas `N to M`) e blocos `vlan N` com `description`.
-  Portas `access` (`port default vlan`), `trunk` (`port trunk allow-pass vlan`, inclusive
-  múltiplas linhas) e `hybrid` (pvid/tagged/untagged) alimentam VLANs tagged/untagged.
-- **IPs**: máscara decimal do VRP (`ip address 10.0.0.1 255.255.255.252`) é convertida
-  para CIDR (`10.0.0.1/30`), incluindo endereços secundários (`sub`) e IPv6.
-- **L2VPN**: `mpls l2vc <peer> <vc-id>` vira **VPWS** (PW-ID = VC-ID, terminado na VLAN
-  da `Vlanif`); blocos `vsi <NOME> [static]` + `l2 binding vsi <NOME>` viram **VPLS**.
-  Nomes de L2VPN repetidos no mesmo equipamento recebem o sufixo da interface para
-  garantir unicidade.
-- **BNG/BRAS**: interfaces de assinante (`user-vlan <ini> <fim> [qinq <S-VLAN>]`) são
-  traduzidas para o modelo QinQ do NetBox (S-VLAN + C-VLANs) e para uma L2VPN do tipo
-  VPLS, o mesmo modelo usado nos OLTs. As VLANs também são cadastradas no IPAM.
-- **Não suportado (ainda)**: transceivers ópticos (`display transceiver`) e o
-  detalhamento de túneis MPLS-TE. Interfaces `NULL0` são ignoradas.
+- **Virtual Systems (VS) / Virtual Device Contexts (VDC)**: Em roteadores particionados (como **NetEngine 8000 / NE40E**), o driver detecta automaticamente os Virtual Systems e os cadastra no NetBox como **Virtual Device Contexts (VDCs)** vinculados ao equipamento físico (`<hostname>-<vs_name>`). Todas as interfaces e subinterfaces de cada VS são atribuídas diretamente ao seu respectivo VDC no NetBox. Se executado no Admin-VS sem `--vs`, o driver coleta os dados do chassi físico e itera automaticamente sobre os Virtual Systems de serviço para extrair suas interfaces, VLANs e IPs. Caso deseje direcionar para um VS específico, basta utilizar `--vs "<NOME_DO_VS>"`.
+- **Coleta SSH**: `display current-configuration`, `display version`, `display esn`, `display device`, `display lldp neighbor brief` e transceivers ópticos via `display interface phy-option` (roteadores) ou `display transceiver` (switches). Auto-paginação transparente e desabilitação via `screen-length 0 temporary`.
+- **Interfaces**: portas físicas (`GigabitEthernet`, `GE`, `XGigabitEthernet`, `XGE`, `10GE`, `25GE`, `40GE`, `50GE`, `100GE`, `FlexE`, `MEth`) vão para interfaces físicas; `Vlanif`, `LoopBack`, `Tunnel`, `Virtual-Template`, `Virtual-Ethernet` e subinterfaces (`Eth-Trunk4.2`, `GE0/1/0.100`) vão para interfaces L3, com vínculo de `parent`.
+- **LAGs**: os `Eth-Trunk` são mapeados como LAG e os membros são descobertos pelo comando `eth-trunk N` presente nas portas físicas.
+- **VLANs**: `vlan batch` (aceita faixas `N to M`) e blocos `vlan N` com `description`. Portas `access` (`port default vlan`), `trunk` (`port trunk allow-pass vlan`) e `hybrid` alimentam VLANs tagged/untagged.
+- **IPs**: máscara decimal do VRP (`ip address 10.0.0.1 255.255.255.252`) é convertida para CIDR (`10.0.0.1/30`), incluindo endereços secundários (`sub`) e IPv6.
+- **L2VPN**: `mpls l2vc <peer> <vc-id>` vira **VPWS**; blocos `vsi <NOME>` + `l2 binding vsi` viram **VPLS**.
+- **BNG/BRAS**: interfaces de assinante (`user-vlan <ini> <fim> [qinq <S-VLAN>]`) são traduzidas para o modelo QinQ do NetBox (S-VLAN + C-VLANs) e para L2VPN VPLS.
+- **Transceivers**: extração automática de modelo óptico, fabricante e part-number em roteadores e switches. Interfaces `NULL0` são ignoradas.
 
 ---
 

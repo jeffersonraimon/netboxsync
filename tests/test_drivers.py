@@ -642,9 +642,127 @@ return
     assert parsed['vlans'].get(115) == 'TESTE-aaa'
 
 
+def test_huawei_driver_ne8000_interfaces_and_esn():
+    sample_cfg = """
+sysname NE8000-TEST
+#
+interface GE0/1/0
+ description UPLINK-1
+ ip address 192.0.2.1 255.255.255.252
+#
+interface 50GE0/2/0
+ description PORTA-50G
+#
+interface FlexE0/3/0
+ description FLEX-PORT
+#
+interface XGE0/4/0
+ description 10G-PORT
+#
+return
+"""
+    driver = get_driver('huawei_vrp')
+    raw = {
+        'config': sample_cfg,
+        'esn': 'ESN of master: 2102350TEST123',
+    }
+    parsed = driver.parse_data(raw)
+    assert parsed['hostname'] == 'NE8000-TEST'
+    assert parsed['serial'] == '2102350TEST123'
+    phys_names = [iface['name'] for iface in parsed['interfaces_physical']]
+    assert 'GE0/1/0' in phys_names
+    assert '50GE0/2/0' in phys_names
+    assert 'FlexE0/3/0' in phys_names
+    assert 'XGE0/4/0' in phys_names
+    ips = [ip['address'] for ip in parsed['ips']]
+    assert '192.0.2.1/30' in ips
 
 
+def test_main_cli_argument_vs():
+    import main
+    parser = main.create_parser()
+    args = parser.parse_args(["--host", "192.0.2.1", "--vs", "BRAS01"])
+    assert args.virtual_system == "BRAS01"
+
+    args_long = parser.parse_args(["--host", "192.0.2.1", "--virtual-system", "VS-INTERNET"])
+    assert args_long.virtual_system == "VS-INTERNET"
 
 
+def test_huawei_driver_virtual_system_vdc():
+    admin_cfg = """
+sysname BRAS-CHASSIS-01
+#
+virtual-system BRAS01
+ port-mode port
+ description BNG-BRAS-01
+ assign interface 100GE0/1/0
+ assign interface GE 0/2/0
+#
+virtual-system VS_BGP
+ port-mode port
+ description Border-Router
+ assign interface 10GE0/3/0
+#
+return
+"""
+    vs_bras_cfg = """
+sysname BRAS01
+#
+vlan batch 100
+#
+interface 100GE0/1/0.100
+ description CLIENTE-TESTE
+ vlan-type dot1q 100
+ ip address 198.51.100.1 255.255.255.0
+#
+return
+"""
+    driver = get_driver('huawei_vrp')
+    raw = {
+        'config': admin_cfg,
+        'config_vs_BRAS01': vs_bras_cfg,
+        'display virtual-system': """
+--------------------------------------------------------------------------------
+ID   Name             Status          Description                     Associated CPU-Template
+--------------------------------------------------------------------------------
+0    public           Running         Default public system           -
+1    BRAS01           Running         BNG-BRAS-01                     default
+2    VS_BGP           Running         Border-Router                   default
+--------------------------------------------------------------------------------
+"""
+    }
+    parsed = driver.parse_data(raw)
 
+    assert parsed['hostname'] == 'BRAS-CHASSIS-01'
+    assert 'logical_systems' in parsed
+    assert 'BRAS01' in parsed['logical_systems']
+    assert 'VS_BGP' in parsed['logical_systems']
+
+    # Interfaces atribuídas pelo bloco virtual-system ou pelo config_vs
+    vdc_bras = "BRAS-CHASSIS-01-BRAS01"
+    vdc_bgp = "BRAS-CHASSIS-01-VS_BGP"
+
+    iface_100ge = next((i for i in parsed['interfaces_physical'] if i['name'] == '100GE0/1/0'), None)
+    assert iface_100ge is not None
+    assert iface_100ge.get('vdc') == vdc_bras
+
+    iface_ge = next((i for i in parsed['interfaces_physical'] if i['name'] == 'GE0/2/0'), None)
+    assert iface_ge is not None
+    assert iface_ge.get('vdc') == vdc_bras
+
+    iface_10ge = next((i for i in parsed['interfaces_physical'] if i['name'] == '10GE0/3/0'), None)
+    assert iface_10ge is not None
+    assert iface_10ge.get('vdc') == vdc_bgp
+
+    # Subinterface criada no VS BRAS01
+    sub_100 = next((i for i in parsed['interfaces_l3'] if i['name'] == '100GE0/1/0.100'), None)
+    assert sub_100 is not None
+    assert sub_100.get('vdc') == vdc_bras
+
+    # IP criado dentro do VS BRAS01
+    ips = [ip['address'] for ip in parsed['ips']]
+    assert '198.51.100.1/24' in ips
+
+    # VLAN criada dentro do VS BRAS01
+    assert 100 in parsed['vlans']
 
