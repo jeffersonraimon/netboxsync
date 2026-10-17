@@ -131,3 +131,68 @@ def test_sync_to_netbox_applies_tenant(mock_pynetbox_api):
     ip_create_call = mock_nb.ipam.ip_addresses.create.call_args
     assert ip_create_call is not None
     assert ip_create_call.kwargs.get('tenant') == 10
+
+
+def test_main_cli_argument_vrf():
+    parser = main.create_parser()
+    args = parser.parse_args(["--host", "10.0.0.1", "--vrf", "CLIENTE-Y"])
+    assert args.vrf == "CLIENTE-Y"
+
+
+@patch("pynetbox.api")
+def test_sync_to_netbox_applies_custom_vrf(mock_pynetbox_api):
+    mock_nb = MagicMock()
+    mock_pynetbox_api.return_value = mock_nb
+
+    # Site mock
+    mock_nb.dcim.sites.filter.return_value = [MagicMock(id=1, name="MTSJ")]
+    # Custom VRF mock (id=55)
+    custom_vrf = MagicMock(id=55, name="CLIENTE-Y")
+    mock_nb.ipam.vrfs.filter.return_value = [custom_vrf]
+
+    # Device mock
+    mock_device = MagicMock(id=100, comments="")
+    mock_device.name = "ROUTER-TEST"
+    mock_nb.dcim.devices.filter.return_value = [mock_device]
+
+    # Interfaces mock
+    mock_iface = MagicMock(id=200)
+    mock_iface.name = "ether1"
+    mock_nb.dcim.interfaces.filter.return_value = [mock_iface]
+
+    # IP mock (não existe, será criado)
+    mock_nb.ipam.ip_addresses.filter.return_value = []
+    created_ip = MagicMock(id=400, address="10.50.0.1/30")
+    mock_nb.ipam.ip_addresses.create.return_value = created_ip
+
+    data = {
+        'hostname': 'ROUTER-TEST',
+        'serial': 'SN12345',
+        'model': 'CCR1036-8G-2S+',
+        'tags': set(),
+        'vlans': {},
+        'interfaces_physical': [{'name': 'ether1', 'description': 'WAN', 'enabled': True}],
+        'interfaces_l3': [],
+        'lags': [],
+        'ips': [{'interface': 'ether1', 'address': '10.50.0.1/30'}],
+        'vpws': [],
+        'vpls': [],
+        'interface_vlans': {},
+        'interface_untagged_vlans': {},
+        'vrrp_groups': [],
+        'lldp_neighbors': []
+    }
+
+    sync_to_netbox(
+        data,
+        url="http://netbox.local",
+        token="test_token",
+        vrf_name="CLIENTE-Y",
+        sync_modules=['ips']
+    )
+
+    # Verifica que o IP foi criado vinculado à VRF customizada (vrf=55)
+    ip_create_call = mock_nb.ipam.ip_addresses.create.call_args
+    assert ip_create_call is not None
+    assert ip_create_call.kwargs.get('vrf') == 55
+

@@ -14,7 +14,7 @@ from drivers import get_driver
 from netbox_sync.sync_engine import sync_to_netbox
 
 
-def print_parsed_summary(parsed_data, default_device_type="", tenant_name=None):
+def print_parsed_summary(parsed_data, default_device_type="", tenant_name=None, vrf_name=None):
     """
     Exibe no terminal um resumo completo contendo todos os dados extraídos pelo driver.
     """
@@ -23,6 +23,8 @@ def print_parsed_summary(parsed_data, default_device_type="", tenant_name=None):
     print(f" Hostname               : {parsed_data.get('hostname') or 'Não identificado'}")
     if tenant_name:
         print(f" Tenant (Cliente)       : {tenant_name}")
+    if vrf_name:
+        print(f" VRF                    : {vrf_name}")
     print(f" Número de Série        : {parsed_data.get('serial') or 'Não identificado'}")
     print(f" Modelo Identificado    : {parsed_data.get('model') or default_device_type}")
     print(f" Tags / Protocolos      : {tags_str}")
@@ -81,7 +83,7 @@ def process_single_host(host, args, password, driver):
         return False, err_msg
 
     # Resumo dos Dados Coletados
-    print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant)
+    print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant, vrf_name=args.vrf)
 
     if args.dry_run:
         print(f"[i] Modo Dry-Run ativo para {hostname}. Nenhuma alteração foi realizada no NetBox.")
@@ -98,6 +100,7 @@ def process_single_host(host, args, password, driver):
             device_role=args.role,
             device_type_model=args.device_type,
             tenant_name=args.tenant,
+            vrf_name=args.vrf,
             verify_ssl=verify_ssl,
             sync_modules=modules_list,
             driver=driver
@@ -141,6 +144,7 @@ def create_parser():
     nb_group.add_argument("--role", "-r", help="Device Role no NetBox (Ex: SWITCH, Router, Edge)", default=config.DEFAULT_DEVICE_ROLE)
     nb_group.add_argument("--device-type", "--model", "-m", dest="device_type", help="Modelo / Device Type no NetBox (Ex: DM4380 12XS+3CX, DM4100)", default=config.DEFAULT_DEVICE_TYPE)
     nb_group.add_argument("--tenant", "-t", help="Nome/Slug do Tenant (Cliente) no NetBox para vincular aos objetos criados", default=getattr(config, 'DEFAULT_TENANT', None))
+    nb_group.add_argument("--vrf", help="Nome da VRF no NetBox para vincular os endereços IP (Padrão: VRF-Global ou via env VRF_NAME)", default=config.VRF_NAME)
     nb_group.add_argument("--insecure", "-k", action="store_true", help="Ignorar verificação de certificado SSL (auto-assinado)")
     nb_group.add_argument("--dry-run", action="store_true", help="Apenas faz o parse e exibe o resumo sem alterar o NetBox")
     nb_group.add_argument(
@@ -213,7 +217,7 @@ def main():
         parsed_data = driver.parse_data(config_content)
 
         hostname = parsed_data.get('hostname') or args.file
-        print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant)
+        print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant, vrf_name=args.vrf)
 
         if args.dry_run:
             print("[i] Modo Dry-Run ativo. Nenhuma alteração foi realizada no NetBox.")
@@ -230,6 +234,7 @@ def main():
                     device_role=args.role,
                     device_type_model=args.device_type,
                     tenant_name=args.tenant,
+                    vrf_name=args.vrf,
                     verify_ssl=verify_ssl,
                     sync_modules=modules_list,
                     driver=driver

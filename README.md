@@ -58,6 +58,7 @@
 
 ### 4. ⚙️ Recursos Avançados de Execução
 - **Vinculação de Tenant (`--tenant` / `-t`)**: Associa automaticamente o Tenant (Cliente) informado a todos os recursos criados ou atualizados que suportam vínculo de tenancy (Equipamento, VLANs, IPs, Circuitos L2VPN, Túneis e Cabos), criando o Tenant no NetBox caso ainda não exista.
+- **Especificação de VRF (`--vrf`)**: Permite direcionar os endereços IP e IPs Virtuais VRRP para uma VRF específica (ex: `--vrf "CLIENTE-Y"`), criando a VRF no NetBox caso ainda não exista.
 - **Modo Simulação (`--dry-run`)**: Executa o parsing dos dados e exibe o resumo completo sem aplicar nenhuma alteração no NetBox.
 - **Sincronização Modular (`--sync-modules`)**: Permite selecionar exatamente quais módulos sincronizar (ex: `--sync-modules vlans,interfaces,ips` ou `all`).
 - **Modo de Depuração (`--debug`)**: Exibe logs detalhados durante a coleta, parsing e comunicação com a API do NetBox.
@@ -121,6 +122,7 @@ netboxsync/
    NETBOX_URL=https://netbox.suaempresa.com.br
    NETBOX_TOKEN=seu_token_api_netbox
    NETBOX_TENANT=CLIENTE-X         # Opcional: Tenant padrão para associar aos objetos
+   VRF_NAME=VRF-Global             # Opcional: Nome da VRF padrão (Padrão: VRF-Global)
    SSH_USER=admin
    SSH_PASS=sua_senha
    ```
@@ -149,6 +151,7 @@ netboxsync/
 | `--role` | `-r` | Device Role no NetBox (ex: `SWITCH`, `Router`). | `SWITCH` |
 | `--device-type` | `-m`, `--model` | Modelo / Device Type no NetBox. | Coleta automática |
 | `--tenant` | `-t` | Nome/Slug do Tenant (Cliente) para vincular aos objetos criados no NetBox. | `.env` (`NETBOX_TENANT`) |
+| `--vrf` | - | Nome da VRF no NetBox para vincular os endereços IP. | `VRF-Global` / `.env` (`VRF_NAME`) |
 | `--insecure` | `-k` | Ignora a verificação de certificado SSL (auto-assinado). | `False` |
 | `--dry-run` | - | Executa a simulação sem realizar alterações no NetBox. | `False` |
 | `--sync-modules` | `-m-sync` | Módulos a sincronizar (`vlans`, `interfaces`, `ips`, `vrrp`, `l2vpn`, `cables`, `transceivers`, `vpn_tunnels`) ou `all`. | `all` |

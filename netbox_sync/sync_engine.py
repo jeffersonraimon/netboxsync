@@ -428,7 +428,7 @@ def delete_netbox_cable(nb, cable_obj, deleted_cable_ids=None):
     return False
 
 
-def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None, device_type_model=None, verify_ssl=None, sync_modules=None, driver=None, tenant_name=None, tenant=None):
+def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None, device_type_model=None, verify_ssl=None, sync_modules=None, driver=None, tenant_name=None, tenant=None, vrf_name=None, vrf=None):
     """
     Sincroniza os dados parseados do equipamento com a API do NetBox.
     Se sync_modules for informado (ex: ['interfaces', 'ips', 'vlans']), sincroniza apenas os modulos listados.
@@ -442,7 +442,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     device_role = device_role or config.DEFAULT_DEVICE_ROLE
     device_type_model = device_type_model or config.DEFAULT_DEVICE_TYPE
     tenant_name = tenant_name or tenant or getattr(config, 'DEFAULT_TENANT', None)
-    vrf_name = config.VRF_NAME
+    vrf_name = vrf_name or vrf or config.VRF_NAME
     
     if verify_ssl is None:
         verify_ssl = not config.DISABLE_SSL_VERIFY
@@ -474,11 +474,36 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     # Rastreia atribuições e alterações de Role em VLANs para auditoria no resumo final
     vlan_role_assignments = []
 
-    # 1. Garantir VRF-Global
+    # 1. Garantir VRF (VRF-Global ou customizada via --vrf)
     vrf_obj = safe_get(nb.ipam.vrfs, name=vrf_name)
     if not vrf_obj:
-        print(f"[+] Criando VRF '{vrf_name}'...")
-        vrf_obj = nb.ipam.vrfs.create(name=vrf_name, rd="65000:1", description="VRF Tabela de Roteamento Global")
+        print(f"[+] Criando VRF '{vrf_name}' no NetBox...")
+        vrf_kwargs = {
+            'name': vrf_name,
+            'description': f"VRF {vrf_name}" if vrf_name != "VRF-Global" else "VRF Tabela de Roteamento Global"
+        }
+        if vrf_name == "VRF-Global":
+            vrf_kwargs['rd'] = "65000:1"
+        if tenant_id:
+            vrf_kwargs['tenant'] = tenant_id
+        try:
+            vrf_obj = nb.ipam.vrfs.create(**vrf_kwargs)
+        except Exception:
+            try:
+                if 'rd' not in vrf_kwargs:
+                    import random
+                    vrf_kwargs['rd'] = f"65000:{random.randint(100, 65000)}"
+                vrf_obj = nb.ipam.vrfs.create(**vrf_kwargs)
+            except Exception as vrf_err:
+                print(f"[!] Erro ao criar VRF '{vrf_name}': {vrf_err}")
+                vrf_obj = safe_get(nb.ipam.vrfs, name=vrf_name)
+    elif tenant_id and vrf_name != "VRF-Global" and not getattr(vrf_obj, 'tenant', None):
+        vrf_obj.tenant = tenant_id
+        try:
+            vrf_obj.save()
+        except Exception:
+            pass
+
     vrf_id = getattr(vrf_obj, 'id', getattr(vrf_obj, 'pk', None))
 
     # 2. Garantir Tags
