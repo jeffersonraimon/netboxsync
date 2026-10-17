@@ -126,6 +126,25 @@ def normalize_interface_name(if_name: str) -> str:
     return clean
 
 
+def is_valid_vs_name(name: Optional[str]) -> bool:
+    """Verifica se o identificador e um nome valido de Virtual System (nao e mensagem de erro/status)."""
+    if not name or len(name) < 2:
+        return False
+    name_clean = name.strip()
+    if any(c in name_clean for c in (':', ' ', '\t', '\r', '\n', '/', '\\', '*', '?', '"', '<', '>', '|')):
+        return False
+    if not re.match(r'^[A-Za-z0-9_\.\-]+$', name_clean):
+        return False
+    lower = name_clean.lower()
+    if lower in (
+        'public', 'admin-vs', 'admin', 'name', 'status', 'description', 
+        'id', 'default', 'error', 'info', 'warning', 'none', 'null',
+        'running', 'stop', 'standby', 'total', 'system'
+    ) or lower.startswith(('error', 'info', 'warning')):
+        return False
+    return True
+
+
 def extract_virtual_systems(vs_text: str) -> List[str]:
     """Extrai nomes de Virtual Systems da saída de display virtual-system."""
     vss = []
@@ -133,19 +152,12 @@ def extract_virtual_systems(vs_text: str) -> List[str]:
         return vss
     for line in vs_text.splitlines():
         line_clean = line.strip()
-        if not line_clean or line_clean.startswith(('---', '===', 'Total', 'The', 'ID', 'Name', '#', '<', '[')):
+        if not line_clean or line_clean.startswith(('---', '===', 'Total', 'The', 'ID', 'Name', '#', '<', '[', 'Error:', 'Info:', 'Warning:')):
             continue
         parts = line_clean.split()
-        if not parts:
-            continue
-        candidate = None
-        if parts[0].isdigit() and len(parts) >= 2:
-            candidate = parts[1]
-        elif not parts[0].isdigit():
-            candidate = parts[0]
-        if candidate:
-            candidate = candidate.strip()
-            if candidate.lower() not in ('public', 'admin-vs', 'admin', 'name', 'status', 'description', 'id', 'default') and candidate not in vss:
+        if len(parts) >= 2 and parts[0].isdigit():
+            candidate = parts[1].strip()
+            if is_valid_vs_name(candidate) and candidate not in vss:
                 vss.append(candidate)
     return vss
 
@@ -154,16 +166,19 @@ def find_matching_vs(candidate: str, available_vss: List[str]) -> Optional[str]:
     """Localiza o Virtual System correspondente no chassi tolerando variações de case/sufixo."""
     if not candidate or not available_vss:
         return None
-    if candidate in available_vss:
+    valid_vss = [v for v in available_vss if is_valid_vs_name(v)]
+    if not valid_vss:
+        return None
+    if candidate in valid_vss:
         return candidate
-    for v in available_vss:
+    for v in valid_vss:
         if v.lower() == candidate.lower():
             return v
-    for v in available_vss:
+    for v in valid_vss:
         if candidate.lower() in v.lower() or v.lower() in candidate.lower():
             return v
     cand_tokens = set(re.findall(r'[a-zA-Z0-9]+', candidate.lower())) - {'vs', 'virtual', 'system'}
-    for v in available_vss:
+    for v in valid_vss:
         v_tokens = set(re.findall(r'[a-zA-Z0-9]+', v.lower())) - {'vs', 'virtual', 'system'}
         if cand_tokens and v_tokens and (cand_tokens & v_tokens):
             return v
@@ -354,7 +369,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 if not service_vss and cfg_out:
                     for m_vs in re.finditer(r'^\s*virtual-system\s+([A-Za-z0-9_\.\-]+)', cfg_out, re.MULTILINE):
                         name = m_vs.group(1).strip()
-                        if name.lower() not in ('public', 'admin-vs', 'admin') and name not in service_vss:
+                        if is_valid_vs_name(name) and name not in service_vss:
                             service_vss.append(name)
 
                 if service_vss:
@@ -983,6 +998,8 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 })
 
         active_vs = raw_outputs.get('active_vs') if isinstance(raw_outputs, dict) else None
+        if active_vs and not is_valid_vs_name(active_vs):
+            active_vs = None
         active_vdc = (f"{data['hostname']}-{active_vs}" if data['hostname'] else active_vs) if active_vs else None
 
         # Processa configuração principal (Admin-VS / chassi ou VS selecionado via --vs)
@@ -993,7 +1010,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         # Virtual Systems (VS) / Virtual Device Contexts (VDC)
         # ------------------------------------------------------------------
         logical_systems: Dict[str, List[str]] = {}
-        if active_vs:
+        if active_vs and is_valid_vs_name(active_vs):
             logical_systems.setdefault(active_vs, [])
 
         if config_text:
@@ -1003,7 +1020,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 re.MULTILINE | re.DOTALL
             ):
                 vs_name = vs_m.group(1).strip()
-                if vs_name.lower() in ('public', 'admin-vs', 'admin'):
+                if not is_valid_vs_name(vs_name):
                     continue
                 vs_body = vs_m.group(2)
                 assigned = []
@@ -1015,23 +1032,30 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         vs_output = self._get_output(raw_outputs, 'vs', 'display virtual-system', 'vs_text')
         if vs_output:
             for vs_name in extract_virtual_systems(vs_output):
-                logical_systems.setdefault(vs_name, [])
+                if is_valid_vs_name(vs_name):
+                    logical_systems.setdefault(vs_name, [])
 
         # Processa configurações coletadas de dentro de cada Virtual System (se houver)
         if isinstance(raw_outputs, dict):
             for k, v in raw_outputs.items():
                 if k.startswith('config_vs_') and v:
                     vs_name = k[len('config_vs_'):]
+                    if not is_valid_vs_name(vs_name):
+                        continue
                     logical_systems.setdefault(vs_name, [])
                     vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
                     _parse_config_block(clean_config(v), vdc_name=vdc_name)
                 elif k.startswith('ip_brief_vs_') and v:
                     vs_name = k[len('ip_brief_vs_'):]
+                    if not is_valid_vs_name(vs_name):
+                        continue
                     logical_systems.setdefault(vs_name, [])
                     vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
                     self._parse_ip_interface_brief(v, data, vdc_name=vdc_name)
                 elif k.startswith('ipv6_brief_vs_') and v:
                     vs_name = k[len('ipv6_brief_vs_'):]
+                    if not is_valid_vs_name(vs_name):
+                        continue
                     logical_systems.setdefault(vs_name, [])
                     vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
                     self._parse_ipv6_interface_brief(v, data, vdc_name=vdc_name)
@@ -1095,6 +1119,9 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                             })
 
             for vs_name in list(logical_systems.keys()):
+                if not is_valid_vs_name(vs_name):
+                    logical_systems.pop(vs_name, None)
+                    continue
                 vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
                 vdc_ifaces = [
                     item['name'] for item in (data['interfaces_physical'] + data['interfaces_l3'] + data['lags'])
@@ -1102,7 +1129,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 ]
                 logical_systems[vs_name] = sorted(list(set(logical_systems[vs_name] + vdc_ifaces)))
 
-        data['logical_systems'] = logical_systems
+        data['logical_systems'] = {k: v for k, v in logical_systems.items() if is_valid_vs_name(k)}
 
         # ------------------------------------------------------------------
         # Roles de VLAN para interfaces L3 (PTP) quando ainda nao classificadas

@@ -903,6 +903,39 @@ def test_huawei_find_matching_vs():
     assert find_matching_vs("INEXISTENTE", available) is None
 
 
+def test_huawei_extract_virtual_systems_ignores_error_and_info_lines():
+    from drivers.huawei_vrp import extract_virtual_systems, is_valid_vs_name
+    assert not is_valid_vs_name("Error:")
+    assert not is_valid_vs_name("Info:")
+    assert not is_valid_vs_name("Warning:")
+    assert not is_valid_vs_name("Admin-VS")
+    assert not is_valid_vs_name("public")
+    assert is_valid_vs_name("vs-bgp")
+    assert is_valid_vs_name("VS-CLIENTE-A")
+
+    raw_output = """
+Info: The virtual system feature is enabled.
+Error: Operation timed out on standby plane.
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    vs-bgp           Running         BGP Routing System
+2    VS-CORP          Running         Corporate VS
+--------------------------------------------------------------------------------
+Total Virtual System: 3
+Warning: License expiring in 30 days.
+"""
+    vss = extract_virtual_systems(raw_output)
+    assert "vs-bgp" in vss
+    assert "VS-CORP" in vss
+    assert "Error:" not in vss
+    assert "Info:" not in vss
+    assert "Warning:" not in vss
+    assert "Admin-VS" not in vss
+    assert "public" not in vss
+
+
 def test_huawei_ipv6_and_single_vs_support():
     """Valida o suporte a IPv6 brief multi-linha, normalizacao de sufixos (10G) e execucao de VS ativo."""
     driver = get_driver('huawei_vrp')

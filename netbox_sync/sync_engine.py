@@ -692,9 +692,28 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
     # 3.5. Sincronizar Virtual Device Contexts (VDCs / Logical Systems / Virtual Systems)
     vdcs_cache = {}
+
+    # Limpeza preventiva de VDCs espúrios gerados por mensagens de erro no chassi (ex: *-Error:, *-Info:)
+    try:
+        existing_vdcs = list(nb.dcim.virtual_device_contexts.filter(device_id=device_id))
+        for old_vdc in existing_vdcs:
+            v_name = getattr(old_vdc, 'name', '')
+            if isinstance(v_name, str) and any(v_name.lower().endswith(s) for s in ('-error:', '-info:', '-warning:', '-error', '-info', '-warning')):
+                print(f"[-] Removendo Virtual Device Context espúrio '{v_name}' do NetBox...")
+                try:
+                    old_vdc.delete()
+                except Exception as del_err:
+                    print(f"[!] Erro ao remover VDC espúrio '{v_name}': {del_err}")
+    except Exception:
+        pass
+
     logical_systems = data.get('logical_systems', {})
     if logical_systems:
-        for ls_name in logical_systems.keys():
+        for ls_name in list(logical_systems.keys()):
+            if not ls_name or any(ls_name.lower().startswith(p) for p in ('error', 'info', 'warning', 'null', 'none')):
+                continue
+            if any(c in ls_name for c in (':', ' ', '\t', '\r', '\n')):
+                continue
             vdc_name = ls_name if ls_name.startswith(f"{hostname}-") else f"{hostname}-{ls_name}"
             vdc_obj = safe_get(nb.dcim.virtual_device_contexts, name=vdc_name, device_id=device_id)
             if not vdc_obj:

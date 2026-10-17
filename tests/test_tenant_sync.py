@@ -307,4 +307,56 @@ def test_sync_to_netbox_ignores_fe80_link_local_ips(mock_pynetbox_api):
         assert not created_addr.lower().startswith('fe80')
 
 
+@patch("pynetbox.api")
+def test_sync_to_netbox_cleans_spurious_vdcs(mock_pynetbox_api):
+    """Valida que VDCs com sufixo -Error: ou -Info: são removidos automaticamente."""
+    mock_nb = MagicMock()
+    mock_pynetbox_api.return_value = mock_nb
+
+    device_obj = MagicMock(id=100, comments="", config_context={})
+    device_obj.name = "ROUTER-TEST"
+    mock_nb.dcim.devices.filter.return_value = [device_obj]
+
+    # Simula VDCs existentes no NetBox para este device: um normal e dois espúrios
+    valid_vdc = MagicMock(id=1)
+    valid_vdc.name = "ROUTER-TEST-VS-PROD"
+    error_vdc = MagicMock(id=2)
+    error_vdc.name = "ROUTER-TEST-Error:"
+    info_vdc = MagicMock(id=3)
+    info_vdc.name = "ROUTER-TEST-Info:"
+    mock_nb.dcim.virtual_device_contexts.filter.return_value = [valid_vdc, error_vdc, info_vdc]
+
+    data = {
+        'hostname': 'ROUTER-TEST',
+        'serial': 'TEST-SN',
+        'model': 'NE8000',
+        'tags': set(),
+        'vlans': {},
+        'logical_systems': {'Error:': [], 'Info:': [], 'VS-PROD': []},
+        'interfaces_physical': [],
+        'interfaces_l3': [],
+        'lags': [],
+        'ips': [],
+        'vpws': [],
+        'vpls': [],
+        'interface_vlans': {},
+        'interface_untagged_vlans': {},
+        'vrrp_groups': [],
+        'lldp_neighbors': []
+    }
+
+    sync_to_netbox(
+        data,
+        url="http://netbox.local",
+        token="test_token",
+        sync_modules=['device']
+    )
+
+    # Garante que os VDCs espúrios foram deletados
+    error_vdc.delete.assert_called_once()
+    info_vdc.delete.assert_called_once()
+    valid_vdc.delete.assert_not_called()
+
+
+
 
