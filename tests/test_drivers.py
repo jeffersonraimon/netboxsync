@@ -766,3 +766,122 @@ ID   Name             Status          Description                     Associated
     # VLAN criada dentro do VS BRAS01
     assert 100 in parsed['vlans']
 
+
+def test_huawei_driver_virtual_system_ne8000_pv_plane_and_ip_brief():
+    admin_cfg = """
+sysname BRAS-CHASSIS-02
+#
+virtual-system VS_CORP pv-plane
+ description Servico-Corporativo
+ assign interface GigabitEthernet0/7/3
+ assign interface GigabitEthernet0/7/4
+#
+return
+"""
+    vs_corp_cfg = """
+sysname VS_CORP
+#
+interface GigabitEthernet0/7/3.100
+ description LINK-MATRIZ
+ vlan-type dot1q 100
+ ip address 192.0.2.1 24
+ ip address 192.0.2.2 24 sub
+#
+return
+"""
+    vs_corp_ip_brief = """
+Interface                         IP Address/Mask      Physical   Protocol  
+GigabitEthernet0/7/3.100          192.0.2.1/24         up         up        
+LoopBack0                         10.0.0.1/32          up         up(s)     
+GigabitEthernet0/7/4              unassigned           *down      down      
+"""
+    vs_corp_int_desc = """
+Interface                   PHY      Protocol Description
+GigabitEthernet0/7/3        up       up       UPLINK-CORP-01
+GigabitEthernet0/7/4        *down    down     RESERVA-EXPANSAO
+"""
+    driver = get_driver('huawei_vrp')
+    raw = {
+        'config': admin_cfg,
+        'config_vs_VS_CORP': vs_corp_cfg,
+        'ip_brief_vs_VS_CORP': vs_corp_ip_brief,
+        'int_desc_vs_VS_CORP': vs_corp_int_desc,
+        'display virtual-system': """
+Total Virtual System: 2
+--------------------------------------------------------------------------------
+ID   Name             Status          Description                     Associated CPU-Template
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Default admin system            -
+1    VS_CORP          Running         Servico-Corporativo             default
+--------------------------------------------------------------------------------
+"""
+    }
+    parsed = driver.parse_data(raw)
+
+    assert parsed['hostname'] == 'BRAS-CHASSIS-02'
+    assert 'logical_systems' in parsed
+    assert 'VS_CORP' in parsed['logical_systems']
+
+    vdc_corp = "BRAS-CHASSIS-02-VS_CORP"
+
+    # Interfaces atribuídas
+    iface_73 = next((i for i in parsed['interfaces_physical'] if i['name'] == 'GigabitEthernet0/7/3'), None)
+    assert iface_73 is not None
+    assert iface_73.get('vdc') == vdc_corp
+    assert iface_73.get('description') == 'UPLINK-CORP-01'
+
+    # Subinterface e LoopBack criadas no VS
+    sub_100 = next((i for i in parsed['interfaces_l3'] if i['name'] == 'GigabitEthernet0/7/3.100'), None)
+    assert sub_100 is not None
+    assert sub_100.get('vdc') == vdc_corp
+    assert sub_100.get('description') == 'LINK-MATRIZ'
+
+    loop0 = next((i for i in parsed['interfaces_l3'] if i['name'] == 'LoopBack0'), None)
+    assert loop0 is not None
+    assert loop0.get('vdc') == vdc_corp
+
+    # IPs extraídos (tanto do config_vs quanto do ip_brief)
+    ips = [ip['address'] for ip in parsed['ips']]
+    assert '192.0.2.1/24' in ips
+    assert '192.0.2.2/24' in ips
+    assert '10.0.0.1/32' in ips
+
+
+def test_huawei_driver_fetch_data_auto_discovers_virtual_systems(monkeypatch):
+    """Valida que o fetch_data identifica Virtual Systems e coleta as configurações de cada um."""
+    driver = get_driver('huawei_vrp')
+
+    executed_commands = []
+
+    class DummySession:
+        def __init__(self, *args, **kwargs):
+            pass
+        def connect(self):
+            pass
+        def close(self):
+            pass
+        def send_command(self, cmd, **kwargs):
+            executed_commands.append(cmd)
+            if cmd == "display virtual-system":
+                return """
+Total Virtual System: 2
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    VS_CLIENTE_A     Running         Virtual System Cliente A
+--------------------------------------------------------------------------------
+"""
+            if cmd == "display current-configuration":
+                return "sysname TEST-ADMIN\n#\n"
+            return ""
+
+    monkeypatch.setattr("drivers.huawei_vrp.SSHClientSession", DummySession)
+
+    outputs = driver.fetch_data(host="192.0.2.1", username="admin", password="password")
+
+    assert "switch virtual-system VS_CLIENTE_A" in executed_commands
+    assert "quit" in executed_commands
+    assert 'config_vs_VS_CLIENTE_A' in outputs
+
+

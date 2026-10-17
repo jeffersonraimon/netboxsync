@@ -51,6 +51,8 @@ DEFAULT_COMMANDS = {
     'esn': 'display esn',
     'device': 'display device',
     'vs': 'display virtual-system',
+    'ip_brief': 'display ip interface brief',
+    'int_desc': 'display interface description',
     'lldp': 'display lldp neighbor brief',
     'phy_option': 'display interface phy-option | no-more',
     'transceiver': 'display transceiver | no-more',
@@ -220,6 +222,10 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                     buf = session.send_command(command, expect_regex=VRP_PROMPT_REGEX, timeout=cmd_timeout)
                     if buf:
                         outputs[key] = buf
+                        if "error:" in buf.lower():
+                            for err_line in buf.splitlines():
+                                if "error:" in err_line.lower():
+                                    print(f"  [!] Alerta no comando '{command}': {err_line.strip()}")
             else:
                 for key, command in commands.items():
                     cmd_timeout = 240 if 'current-configuration' in command else 90
@@ -227,28 +233,180 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                     buf = session.send_command(command, expect_regex=VRP_PROMPT_REGEX, timeout=cmd_timeout)
                     if buf:
                         outputs[key] = buf
+                        if "error:" in buf.lower():
+                            for err_line in buf.splitlines():
+                                if "error:" in err_line.lower():
+                                    print(f"  [!] Alerta no comando '{command}': {err_line.strip()}")
 
                 # Verifica se o equipamento possui Virtual Systems configurados (modo Admin-VS)
                 vs_check = outputs.get('vs') or session.send_command("display virtual-system", expect_regex=VRP_PROMPT_REGEX, timeout=10)
+                service_vss: List[str] = []
                 if vs_check:
                     outputs['vs'] = vs_check
-                    if "virtual-system" in vs_check.lower():
-                        vs_matches = re.findall(r'^\s*\d+\s+([A-Za-z0-9_\.\-]+)', vs_check, re.MULTILINE)
-                        service_vss = [v for v in vs_matches if v.lower() not in ('public', 'admin-vs', 'admin')]
-                        if service_vss:
-                            print(f"  [!] Detectado chassi com Virtual Systems (VS) ativos: {service_vss}")
-                            for svs in service_vss:
-                                print(f"  [➔] Coletando configurações do Virtual System: '{svs}'...")
-                                session.send_command(f"switch virtual-system {svs}", expect_regex=VRP_PROMPT_REGEX, timeout=15)
-                                session.send_command("screen-length 0 temporary", timeout=10)
-                                svs_cfg = session.send_command("display current-configuration", expect_regex=VRP_PROMPT_REGEX, timeout=240)
-                                if svs_cfg:
-                                    outputs[f'config_vs_{svs}'] = svs_cfg
-                                session.send_command("quit", expect_regex=VRP_PROMPT_REGEX, timeout=10)
+                    for line in vs_check.splitlines():
+                        parts = line.strip().split()
+                        if len(parts) >= 2 and parts[0].isdigit():
+                            name = parts[1].strip()
+                            if name.lower() not in ('public', 'admin-vs', 'admin') and name not in service_vss:
+                                service_vss.append(name)
+
+                # Fallback: se 'display virtual-system' nao listou servicos mas o config contem 'virtual-system <NAME>'
+                cfg_out = outputs.get('config') or ''
+                if not service_vss and cfg_out:
+                    for m_vs in re.finditer(r'^\s*virtual-system\s+([A-Za-z0-9_\.\-]+)', cfg_out, re.MULTILINE):
+                        name = m_vs.group(1).strip()
+                        if name.lower() not in ('public', 'admin-vs', 'admin') and name not in service_vss:
+                            service_vss.append(name)
+
+                if service_vss:
+                    print(f"  [!] Detectado chassi com Virtual Systems (VS) ativos: {service_vss}")
+                    for svs in service_vss:
+                        print(f"  [➔] Alternando para Virtual System (VS): '{svs}'...")
+                        session.send_command(f"switch virtual-system {svs}", expect_regex=VRP_PROMPT_REGEX, timeout=15)
+                        session.send_command("screen-length 0 temporary", timeout=10)
+
+                        print(f"  [➔] [{svs}] Executando: display current-configuration")
+                        svs_cfg = session.send_command("display current-configuration", expect_regex=VRP_PROMPT_REGEX, timeout=240)
+                        if svs_cfg:
+                            outputs[f'config_vs_{svs}'] = svs_cfg
+                            if "error:" in svs_cfg.lower():
+                                for err_line in svs_cfg.splitlines():
+                                    if "error:" in err_line.lower():
+                                        print(f"  [!] [{svs}] Alerta: {err_line.strip()}")
+
+                        print(f"  [➔] [{svs}] Executando: display ip interface brief")
+                        svs_ip = session.send_command("display ip interface brief", expect_regex=VRP_PROMPT_REGEX, timeout=60)
+                        if svs_ip:
+                            outputs[f'ip_brief_vs_{svs}'] = svs_ip
+
+                        print(f"  [➔] [{svs}] Executando: display interface description")
+                        svs_desc = session.send_command("display interface description", expect_regex=VRP_PROMPT_REGEX, timeout=60)
+                        if svs_desc:
+                            outputs[f'int_desc_vs_{svs}'] = svs_desc
+
+                        session.send_command("quit", expect_regex=VRP_PROMPT_REGEX, timeout=10)
         finally:
             session.close()
 
         return outputs
+
+    def _parse_ip_interface_brief(self, text: str, data: Dict[str, Any], vdc_name: Optional[str] = None) -> None:
+        """
+        Analisa a saida de `display ip interface brief` e popula interfaces e IPs faltantes.
+        """
+        if not text:
+            return
+
+        existing_phys = {i['name'] for i in data['interfaces_physical']}
+        existing_l3 = {i['name'] for i in data['interfaces_l3']}
+        existing_lags = {i['name'] for i in data['lags']}
+        existing_ips = {(x['interface'], x['address']) for x in data['ips']}
+
+        for line in text.splitlines():
+            line_str = line.strip()
+            if not line_str or line_str.startswith(('<', '[', '#', '*', '(', 'Interface', '---', 'Total')):
+                continue
+            parts = line_str.split()
+            if len(parts) < 2:
+                continue
+            if_name = parts[0]
+            if if_name.lower().startswith(('null', 'total', '---')):
+                continue
+
+            # Localiza token com notacao CIDR de IP (ex: 192.0.2.1/24)
+            ip_token = None
+            for p in parts[1:]:
+                if '/' in p and not p.lower().startswith(('up', 'down', 'err')):
+                    ip_token = p
+                    break
+
+            is_enabled = not any('*down' in p.lower() for p in parts)
+
+            # Classifica e registra a interface se ainda nao existir
+            if is_subinterface(if_name) or is_virtual_l3(if_name):
+                if if_name not in existing_l3:
+                    entry = {
+                        'name': if_name,
+                        'description': '',
+                        'enabled': is_enabled,
+                        'mtu': None,
+                        'vlan': str(vlanif_vid(if_name) or 0),
+                        'parent': iface_base(if_name) if is_subinterface(if_name) else None,
+                    }
+                    if vdc_name:
+                        entry['vdc'] = vdc_name
+                    data['interfaces_l3'].append(entry)
+                    existing_l3.add(if_name)
+                elif vdc_name:
+                    for item in data['interfaces_l3']:
+                        if item['name'] == if_name and not item.get('vdc'):
+                            item['vdc'] = vdc_name
+            elif iface_base(if_name).lower().startswith('eth-trunk'):
+                if if_name not in existing_lags:
+                    entry = {
+                        'name': if_name,
+                        'description': '',
+                        'enabled': is_enabled,
+                        'mtu': None,
+                        'members': []
+                    }
+                    if vdc_name:
+                        entry['vdc'] = vdc_name
+                    data['lags'].append(entry)
+                    existing_lags.add(if_name)
+                elif vdc_name:
+                    for item in data['lags']:
+                        if item['name'] == if_name and not item.get('vdc'):
+                            item['vdc'] = vdc_name
+            elif is_physical(if_name):
+                if if_name not in existing_phys:
+                    entry = {
+                        'name': if_name,
+                        'description': '',
+                        'enabled': is_enabled,
+                        'mtu': None
+                    }
+                    if vdc_name:
+                        entry['vdc'] = vdc_name
+                    data['interfaces_physical'].append(entry)
+                    existing_phys.add(if_name)
+                elif vdc_name:
+                    for item in data['interfaces_physical']:
+                        if item['name'] == if_name and not item.get('vdc'):
+                            item['vdc'] = vdc_name
+
+            # Adiciona o endereco IP se encontrado
+            if ip_token and ip_token.lower() != 'unassigned':
+                try:
+                    cidr_obj = ipaddress.ip_interface(ip_token)
+                    cidr_str = str(cidr_obj)
+                    if (if_name, cidr_str) not in existing_ips:
+                        data['ips'].append({'interface': if_name, 'address': cidr_str})
+                        existing_ips.add((if_name, cidr_str))
+                except Exception:
+                    pass
+
+    def _parse_interface_description(self, text: str, data: Dict[str, Any]) -> None:
+        """
+        Analisa a saida de `display interface description` e atualiza descricoes.
+        """
+        if not text:
+            return
+
+        for line in text.splitlines():
+            line_str = line.strip()
+            if not line_str or line_str.startswith(('<', '[', '#', 'Interface', '---', 'Total')):
+                continue
+            parts = line_str.split(None, 3)
+            if len(parts) >= 4:
+                if_name, phy, proto, desc = parts[0], parts[1], parts[2], parts[3]
+                clean_desc = clean_description(desc)
+                if not clean_desc:
+                    continue
+                for item in data['interfaces_physical'] + data['interfaces_l3'] + data['lags']:
+                    cur_desc = item.get('description') or ''
+                    if item['name'] == if_name and (not cur_desc or cur_desc.startswith('Assigned to ')):
+                        item['description'] = clean_desc
 
     def parse_data(self, raw_outputs: Any) -> Dict[str, Any]:
         """
@@ -263,6 +421,8 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         lldp_text = self._get_output(raw_outputs, 'lldp', 'display lldp neighbor brief', 'lldp_text')
         phy_option_text = self._get_output(raw_outputs, 'phy_option', 'display interface phy-option | no-more', 'phy_option_text')
         transceiver_text = self._get_output(raw_outputs, 'transceiver', 'display transceiver | no-more', 'transceiver_text')
+        ip_brief_text = self._get_output(raw_outputs, 'ip_brief', 'display ip interface brief', 'ip_brief_text')
+        int_desc_text = self._get_output(raw_outputs, 'int_desc', 'display interface description', 'int_desc_text')
 
         config_text = clean_config(config_raw)
 
@@ -420,19 +580,17 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 if vdc_name:
                     common['vdc'] = vdc_name
 
-                # Enderecos IP
-                for ip_match in re.finditer(r'^\s*ip address\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)', body, re.MULTILINE):
+                # Enderecos IP (suporta mascara decimal '255.255.255.0', prefixo '24' e alias 'sub')
+                for ip_match in re.finditer(r'^\s*ip address\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+|\d{1,2})(?:\s+sub)?', body, re.MULTILINE):
                     cidr = ipv4_to_cidr(ip_match.group(1), ip_match.group(2))
                     if cidr:
-                        data['ips'].append({'interface': if_name, 'address': cidr})
-                for ip6_match in re.finditer(r'^\s*ipv6 address\s+([0-9A-Fa-f:]{2,})\s*/\s*(\d{1,3})', body, re.MULTILINE):
+                        if not any(x['interface'] == if_name and x['address'] == cidr for x in data['ips']):
+                            data['ips'].append({'interface': if_name, 'address': cidr})
+                for ip6_match in re.finditer(r'^\s*ipv6 address\s+([0-9A-Fa-f:]+)(?:/|\s+)(\d{1,3})(?:\s+sub)?', body, re.MULTILINE):
                     cidr = ipv6_to_cidr(ip6_match.group(1), ip6_match.group(2))
                     if cidr:
-                        data['ips'].append({'interface': if_name, 'address': cidr})
-                for ip6_match in re.finditer(r'^\s*ipv6 address\s+([0-9A-Fa-f:]{2,})\s+(\d{1,3})\s*$', body, re.MULTILINE):
-                    cidr = ipv6_to_cidr(ip6_match.group(1), ip6_match.group(2))
-                    if cidr:
-                        data['ips'].append({'interface': if_name, 'address': cidr})
+                        if not any(x['interface'] == if_name and x['address'] == cidr for x in data['ips']):
+                            data['ips'].append({'interface': if_name, 'address': cidr})
 
                 # VRRP
                 for vrrp_match in re.finditer(r'^\s*vrrp vrid\s+(\d+)\s+virtual-ip\s+(\S+)', body, re.MULTILINE):
@@ -596,7 +754,7 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         logical_systems: Dict[str, List[str]] = {}
         if config_text:
             for vs_m in re.finditer(
-                r'^\s*virtual-system\s+([A-Za-z0-9_\.\-]+)\s*\n(.*?)(?=^\s*virtual-system\b|^#\s*$|^return|\Z)',
+                r'^\s*virtual-system\s+([A-Za-z0-9_\.\-]+)(?:[^\n]*)\n(.*?)(?=^\s*virtual-system\b|^return|\Z)',
                 config_text,
                 re.MULTILINE | re.DOTALL
             ):
@@ -613,9 +771,9 @@ class HuaweiVRPDriver(BaseDeviceDriver):
         vs_output = self._get_output(raw_outputs, 'vs', 'display virtual-system', 'vs_text')
         if vs_output:
             for line in vs_output.splitlines():
-                m = re.match(r'^\s*\d+\s+([A-Za-z0-9_\.\-]+)\s+(?:Running|Down|Active|Inactive)\b', line, re.IGNORECASE)
-                if m:
-                    vs_name = m.group(1).strip()
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    vs_name = parts[1].strip()
                     if vs_name.lower() not in ('public', 'admin-vs', 'admin'):
                         logical_systems.setdefault(vs_name, [])
 
@@ -627,6 +785,14 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                     logical_systems.setdefault(vs_name, [])
                     vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
                     _parse_config_block(clean_config(v), vdc_name=vdc_name)
+                elif k.startswith('ip_brief_vs_') and v:
+                    vs_name = k[len('ip_brief_vs_'):]
+                    logical_systems.setdefault(vs_name, [])
+                    vdc_name = f"{data['hostname']}-{vs_name}" if data['hostname'] else vs_name
+                    self._parse_ip_interface_brief(v, data, vdc_name=vdc_name)
+        # Processa ip_brief global / Admin-VS
+        if ip_brief_text:
+            self._parse_ip_interface_brief(ip_brief_text, data)
 
         # Finaliza LAGs (Eth-Trunk)
         for lag_name, members in lag_members.items():
@@ -724,6 +890,14 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                     'mtu': None,
                 })
                 existing_phys.add(inv_iface)
+
+        # Atualiza descrições de interface via display interface description (global e por VS)
+        if int_desc_text:
+            self._parse_interface_description(int_desc_text, data)
+        if isinstance(raw_outputs, dict):
+            for k, v in raw_outputs.items():
+                if k.startswith('int_desc_vs_') and v:
+                    self._parse_interface_description(v, data)
 
         return data
 
