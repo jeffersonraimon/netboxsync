@@ -885,3 +885,133 @@ ID   Name             Status          Description
     assert 'config_vs_VS_CLIENTE_A' in outputs
 
 
+def test_huawei_interface_name_normalization():
+    from drivers.huawei_vrp import normalize_interface_name
+    assert normalize_interface_name("GigabitEthernet0/7/5.2124(10G)") == "GigabitEthernet0/7/5.2124"
+    assert normalize_interface_name("100GE0/1/0(100G)") == "100GE0/1/0"
+    assert normalize_interface_name("GE0/2/0(GE)") == "GE0/2/0"
+    assert normalize_interface_name("Eth-Trunk0.28") == "Eth-Trunk0.28"
+
+
+def test_huawei_find_matching_vs():
+    from drivers.huawei_vrp import find_matching_vs
+    available = ["vs-bgp", "VS_CORP", "VS-CLIENTE-TESTE"]
+    assert find_matching_vs("vs-bgp", available) == "vs-bgp"
+    assert find_matching_vs("VS-BGP", available) == "vs-bgp"
+    assert find_matching_vs("VS-BGP-ANY-LABEL", available) == "vs-bgp"
+    assert find_matching_vs("cliente-teste", available) == "VS-CLIENTE-TESTE"
+    assert find_matching_vs("INEXISTENTE", available) is None
+
+
+def test_huawei_ipv6_and_single_vs_support():
+    """Valida o suporte a IPv6 brief multi-linha, normalizacao de sufixos (10G) e execucao de VS ativo."""
+    driver = get_driver('huawei_vrp')
+
+    ip_brief = """
+*down: administratively down
+The number of interface that is UP in Physical is 4
+Interface                         IP Address/Mask      Physical   Protocol VPN 
+Eth-Trunk0.28                     192.0.2.1/30         up         up       --  
+GigabitEthernet0/7/5.2124(10G)    198.51.100.1/30      up         up       --  
+LoopBack0                         203.0.113.1/32       up         up(s)    --  
+Virtual-Ethernet0/3/31.4000       10.0.0.1/30          up         up       --  
+"""
+
+    ipv6_brief = """
+*down: administratively down
+Interface                    Physical              Protocol VPN
+Eth-Trunk0.28                up                    up       --      
+[IPv6 Address/Prefix Length] 2001:db8:1::2/64  
+GigabitEthernet0/7/5.2124    up                    up       --      
+[IPv6 Address/Prefix Length] 2001:db8:2::2/64  
+LoopBack0                    up                    up(s)    --      
+[IPv6 Address/Prefix Length] 2001:db8:3::1/128  
+Virtual-Ethernet0/3/31.4000  up                    up       --      
+[IPv6 Address/Prefix Length] 2001:db8:4::1/64
+"""
+
+    raw = {
+        'active_vs': 'vs-bgp',
+        'config': 'sysname ROUTER-TEST\n#\n',
+        'esn': 'ESN of master: 2102353TESTSERIAL01',
+        'version': 'HUAWEI NetEngine 8000 uptime is 10 weeks',
+        'ip_brief': ip_brief,
+        'ipv6_brief': ipv6_brief,
+        'vs': """
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    vs-bgp           Running         BGP Border
+--------------------------------------------------------------------------------
+"""
+    }
+
+    parsed = driver.parse_data(raw)
+    assert parsed['hostname'] == 'ROUTER-TEST'
+    assert parsed['serial'] == '2102353TESTSERIAL01'
+    assert 'vs-bgp' in parsed['logical_systems']
+
+    vdc_expected = "ROUTER-TEST-vs-bgp"
+
+    # Verifica que interfaces foram normalizadas e vinculadas ao VDC
+    iface_names = {i['name'] for i in parsed['interfaces_l3']}
+    assert "GigabitEthernet0/7/5.2124" in iface_names
+    assert "GigabitEthernet0/7/5.2124(10G)" not in iface_names
+    assert "Eth-Trunk0.28" in iface_names
+    assert "Virtual-Ethernet0/3/31.4000" in iface_names
+
+    for iface in parsed['interfaces_l3']:
+        assert iface.get('vdc') == vdc_expected
+
+    # Verifica se os IPs IPv4 e IPv6 foram extraídos para as interfaces corretas
+    ips_map = {(ip['interface'], ip['address']) for ip in parsed['ips']}
+    assert ("GigabitEthernet0/7/5.2124", "198.51.100.1/30") in ips_map
+    assert ("GigabitEthernet0/7/5.2124", "2001:db8:2::2/64") in ips_map
+    assert ("Eth-Trunk0.28", "192.0.2.1/30") in ips_map
+    assert ("Eth-Trunk0.28", "2001:db8:1::2/64") in ips_map
+    assert ("LoopBack0", "203.0.113.1/32") in ips_map
+    assert ("LoopBack0", "2001:db8:3::1/128") in ips_map
+
+
+def test_huawei_fetch_data_with_specific_vs_matches_and_switches(monkeypatch):
+    """Valida que quando --vs e fornecido, dados do chassi sao coletados no Admin-VS e depois alterna para o VS."""
+    driver = get_driver('huawei_vrp')
+    executed_commands = []
+
+    class DummySession:
+        def __init__(self, *args, **kwargs):
+            pass
+        def connect(self):
+            pass
+        def close(self):
+            pass
+        def send_command(self, cmd, **kwargs):
+            executed_commands.append(cmd)
+            if cmd == "display virtual-system":
+                return """
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    vs-bgp           Running         BGP Routing System
+--------------------------------------------------------------------------------
+"""
+            if cmd == "display esn":
+                return "ESN of master: 2102353TESTESN99"
+            if cmd == "display current-configuration":
+                return "sysname TEST-VS-ROUTER\n#\n"
+            return ""
+
+    monkeypatch.setattr("drivers.huawei_vrp.SSHClientSession", DummySession)
+
+    outputs = driver.fetch_data(host="192.0.2.1", username="admin", password="password", vs="VS-BGP-CLIENTE")
+
+    assert "display esn" in executed_commands
+    assert "switch virtual-system vs-bgp" in executed_commands
+    assert "display ipv6 interface brief" in executed_commands
+    assert "quit" in executed_commands
+    assert outputs.get('active_vs') == 'vs-bgp'
+
+
+
