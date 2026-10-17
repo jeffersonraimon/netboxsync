@@ -67,7 +67,7 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
         Retorna dicionário {chave: valor}.
         """
         # Remove prompts residuais do RouterOS (ex: <user@host] > ou [user@host] >)
-        line = re.sub(r'[<\[][\w\.\-]+@[^\]>\s]+[\]>]?\s*>?', '', line)
+        line = re.sub(r'[<\[][\w\.\-]+@[^\]>]+[\]>]?\s*>?', '', line)
         fields = {}
         # Regex para capturar k=v onde v pode ser "string com espaço" ou sem aspas
         matches = re.findall(r'([\w\-]+)=(?:"([^"]*)"|([^\s]+))', line)
@@ -86,7 +86,7 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
         # Remove sequências de escape ANSI
         text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
         # Remove prompts do RouterOS como <user@host] > ou [user@host] >
-        text = re.sub(r'[<\[][\w\.\-]+@[^\]>\s]+[\]>]?\s*>?', '', text)
+        text = re.sub(r'[<\[][\w\.\-]+@[^\]>]+[\]>]?\s*>?', '', text)
 
         lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
         unwrapped = []
@@ -140,10 +140,13 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
         # Normaliza raw_outputs para dicionário de comandos ou string completa desfazendo quebras do PTY
         cmd_dict = {}
         full_text = ""
+        raw_text_combined = ""
 
         if isinstance(raw_outputs, str):
+            raw_text_combined = raw_outputs
             full_text = self._normalize_raw_text(raw_outputs)
         elif isinstance(raw_outputs, dict):
+            raw_text_combined = "\n".join([f"{k}\n{v}" for k, v in raw_outputs.items()])
             cmd_dict = {k: self._normalize_raw_text(v) for k, v in raw_outputs.items()}
             full_text = "\n".join([str(v) for v in cmd_dict.values()])
 
@@ -155,11 +158,10 @@ class MikrotikRouterOSDriver(BaseDeviceDriver):
 
         # 1. Hostname (/system identity print ou prompt/export fallback)
         identity_out = get_output_for("/system identity")
-        # Prioriza o prompt do terminal "[admin@ROUTER-EDGE]" ou "name: ROUTER-EDGE"
-        name_match = re.search(r'\[[\w\-]+@([^\]\s]+)\]', full_text) or \
-                     re.search(r'name:\s*([^\s\n\r]+)', identity_out, re.IGNORECASE) or \
-                     re.search(r'set\s+name=(?:"([^"]*)"|([^\s\n\r]+))', identity_out, re.IGNORECASE) or \
-                     re.search(r'name=(?:"([^"]*)"|([^\s\n\r]+))', identity_out, re.IGNORECASE)
+        name_match = re.search(r'name:\s*(?:"([^"]+)"|([^\r\n]+))', identity_out, re.IGNORECASE) or \
+                     re.search(r'set\s+name=(?:"([^"]+)"|([^\s\r\n]+))', identity_out, re.IGNORECASE) or \
+                     re.search(r'name=(?:"([^"]+)"|([^\s\r\n]+))', identity_out, re.IGNORECASE) or \
+                     re.search(r'\[[\w\.\-]+@([^\]\r\n]+)\]', raw_text_combined)
         if name_match:
             groups = [g for g in name_match.groups() if g is not None]
             if groups:

@@ -241,6 +241,25 @@ def test_routeros_driver_parse_data():
     assert parsed['lldp_neighbors'][0]['remote_interface'] == 'ether5'
 
 
+def test_routeros_identity_with_spaces():
+    driver = get_driver('routeros')
+
+    # Teste 1: /system identity print clássico com espaços
+    out1 = {"/system identity print": "      name: CGNAT - CLIENTE\n"}
+    parsed1 = driver.parse_data(out1)
+    assert parsed1['hostname'] == "CGNAT - CLIENTE"
+
+    # Teste 2: /system identity set name="..."
+    out2 = {"/system identity export": "/system identity set name=\"CGNAT - CLIENTE\"\n"}
+    parsed2 = driver.parse_data(out2)
+    assert parsed2['hostname'] == "CGNAT - CLIENTE"
+
+    # Teste 3: Prompt de terminal RouterOS [user@CGNAT - CLIENTE]
+    out3 = "[vontinoc@CGNAT - CLIENTE] > /interface export"
+    parsed3 = driver.parse_data(out3)
+    assert parsed3['hostname'] == "CGNAT - CLIENTE"
+
+
 SAMPLE_ROUTEROS_WRAPPED = """
 /interface pppoe-client add allow=chap,mschap1,mschap2 comment="PPPOE CLIENT" dis
 abled=no interface=ether1 name=LINK-MAIN-PPPOE user=user_demo
