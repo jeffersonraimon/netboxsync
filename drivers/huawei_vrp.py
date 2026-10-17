@@ -54,8 +54,8 @@ DEFAULT_COMMANDS = {
     'ip_brief': 'display ip interface brief',
     'int_desc': 'display interface description',
     'lldp': 'display lldp neighbor brief',
-    'phy_option': 'display interface phy-option | no-more',
-    'transceiver': 'display transceiver | no-more',
+    'phy_option': 'display interface phy-option',
+    'transceiver': 'display transceiver',
 }
 
 # Precisao usada ao esperar o prompt do VRP: <HOST>, <HOST> ou [~HOST]
@@ -217,6 +217,8 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                 session.send_command(f"switch virtual-system {vs_name}", expect_regex=VRP_PROMPT_REGEX, timeout=15)
                 session.send_command("screen-length 0 temporary", timeout=10)
                 for key, command in commands.items():
+                    if key == 'transceiver' and outputs.get('phy_option') and 'Port Physical Status' in outputs['phy_option']:
+                        continue
                     cmd_timeout = 240 if 'current-configuration' in command else 90
                     print(f"  [➔] Executando comando: {command}")
                     buf = session.send_command(command, expect_regex=VRP_PROMPT_REGEX, timeout=cmd_timeout)
@@ -226,8 +228,15 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                             for err_line in buf.splitlines():
                                 if "error:" in err_line.lower():
                                     print(f"  [!] Alerta no comando '{command}': {err_line.strip()}")
+                        if key == 'config' and "operation timed out" in buf.lower():
+                            print("  [➔] 'display current-configuration' excedeu tempo na CPU. Tentando fallback leve: 'display current-configuration interface'...")
+                            fb_buf = session.send_command("display current-configuration interface", expect_regex=VRP_PROMPT_REGEX, timeout=120)
+                            if fb_buf and "error:" not in fb_buf.lower():
+                                outputs[key] = fb_buf
             else:
                 for key, command in commands.items():
+                    if key == 'transceiver' and outputs.get('phy_option') and 'Port Physical Status' in outputs['phy_option']:
+                        continue
                     cmd_timeout = 240 if 'current-configuration' in command else 90
                     print(f"  [➔] Executando comando: {command}")
                     buf = session.send_command(command, expect_regex=VRP_PROMPT_REGEX, timeout=cmd_timeout)
@@ -237,6 +246,11 @@ class HuaweiVRPDriver(BaseDeviceDriver):
                             for err_line in buf.splitlines():
                                 if "error:" in err_line.lower():
                                     print(f"  [!] Alerta no comando '{command}': {err_line.strip()}")
+                        if key == 'config' and "operation timed out" in buf.lower():
+                            print("  [➔] 'display current-configuration' excedeu tempo na CPU. Tentando fallback leve: 'display current-configuration interface'...")
+                            fb_buf = session.send_command("display current-configuration interface", expect_regex=VRP_PROMPT_REGEX, timeout=120)
+                            if fb_buf and "error:" not in fb_buf.lower():
+                                outputs[key] = fb_buf
 
                 # Verifica se o equipamento possui Virtual Systems configurados (modo Admin-VS)
                 vs_check = outputs.get('vs') or session.send_command("display virtual-system", expect_regex=VRP_PROMPT_REGEX, timeout=10)
