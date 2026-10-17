@@ -14,13 +14,15 @@ from drivers import get_driver
 from netbox_sync.sync_engine import sync_to_netbox
 
 
-def print_parsed_summary(parsed_data, default_device_type=""):
+def print_parsed_summary(parsed_data, default_device_type="", tenant_name=None):
     """
     Exibe no terminal um resumo completo contendo todos os dados extraídos pelo driver.
     """
     tags_str = ", ".join(sorted(parsed_data.get('tags') or [])) or "Nenhuma"
     print("\n================ RESUMO DAS INFORMAÇÕES EXTRAÍDAS ================")
     print(f" Hostname               : {parsed_data.get('hostname') or 'Não identificado'}")
+    if tenant_name:
+        print(f" Tenant (Cliente)       : {tenant_name}")
     print(f" Número de Série        : {parsed_data.get('serial') or 'Não identificado'}")
     print(f" Modelo Identificado    : {parsed_data.get('model') or default_device_type}")
     print(f" Tags / Protocolos      : {tags_str}")
@@ -79,7 +81,7 @@ def process_single_host(host, args, password, driver):
         return False, err_msg
 
     # Resumo dos Dados Coletados
-    print_parsed_summary(parsed_data, default_device_type=args.device_type)
+    print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant)
 
     if args.dry_run:
         print(f"[i] Modo Dry-Run ativo para {hostname}. Nenhuma alteração foi realizada no NetBox.")
@@ -95,6 +97,7 @@ def process_single_host(host, args, password, driver):
             site_name=args.site,
             device_role=args.role,
             device_type_model=args.device_type,
+            tenant_name=args.tenant,
             verify_ssl=verify_ssl,
             sync_modules=modules_list,
             driver=driver
@@ -107,7 +110,7 @@ def process_single_host(host, args, password, driver):
         return False, f"Erro NetBox: {sync_err}", [], []
 
 
-def main():
+def create_parser():
     parser = argparse.ArgumentParser(description="Automação & Sincronização Multimarcas (Multi-Vendor) -> NetBox")
 
     # Driver de Fabricante
@@ -137,6 +140,7 @@ def main():
     nb_group.add_argument("--site", "-s", help="Nome/Slug do Site (POP) no NetBox (Ex: MTSJ, SSA, BA-POP01)", default=config.DEFAULT_SITE_NAME)
     nb_group.add_argument("--role", "-r", help="Device Role no NetBox (Ex: SWITCH, Router, Edge)", default=config.DEFAULT_DEVICE_ROLE)
     nb_group.add_argument("--device-type", "--model", "-m", dest="device_type", help="Modelo / Device Type no NetBox (Ex: DM4380 12XS+3CX, DM4100)", default=config.DEFAULT_DEVICE_TYPE)
+    nb_group.add_argument("--tenant", "-t", help="Nome/Slug do Tenant (Cliente) no NetBox para vincular aos objetos criados", default=getattr(config, 'DEFAULT_TENANT', None))
     nb_group.add_argument("--insecure", "-k", action="store_true", help="Ignorar verificação de certificado SSL (auto-assinado)")
     nb_group.add_argument("--dry-run", action="store_true", help="Apenas faz o parse e exibe o resumo sem alterar o NetBox")
     nb_group.add_argument(
@@ -145,6 +149,11 @@ def main():
         default="all"
     )
 
+    return parser
+
+
+def main():
+    parser = create_parser()
     args = parser.parse_args()
 
     # Instancia o Driver correto via Factory
@@ -204,7 +213,7 @@ def main():
         parsed_data = driver.parse_data(config_content)
 
         hostname = parsed_data.get('hostname') or args.file
-        print_parsed_summary(parsed_data, default_device_type=args.device_type)
+        print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant)
 
         if args.dry_run:
             print("[i] Modo Dry-Run ativo. Nenhuma alteração foi realizada no NetBox.")
@@ -220,6 +229,7 @@ def main():
                     site_name=args.site,
                     device_role=args.role,
                     device_type_model=args.device_type,
+                    tenant_name=args.tenant,
                     verify_ssl=verify_ssl,
                     sync_modules=modules_list,
                     driver=driver

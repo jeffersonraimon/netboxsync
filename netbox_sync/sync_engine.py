@@ -76,6 +76,48 @@ def find_netbox_device(nb, dev_name):
     return None
 
 
+def find_or_create_tenant(nb, tenant_name):
+    """
+    Busca ou cria um Tenant no NetBox pelo nome ou slug.
+    """
+    if not tenant_name or not getattr(nb, 'tenancy', None):
+        return None
+
+    tenant_name_clean = str(tenant_name).strip()
+    if not tenant_name_clean:
+        return None
+
+    # 1. Busca por nome exato ou slug
+    tenant_obj = safe_get(nb.tenancy.tenants, name=tenant_name_clean)
+    if not tenant_obj:
+        slug = re.sub(r'[^\w\-]', '_', tenant_name_clean.lower()).strip('_') or "tenant"
+        tenant_obj = safe_get(nb.tenancy.tenants, slug=slug)
+
+    if not tenant_obj:
+        try:
+            tenants_all = list(nb.tenancy.tenants.all())
+            slug = re.sub(r'[^\w\-]', '_', tenant_name_clean.lower()).strip('_') or "tenant"
+            tenant_obj = next((t for t in tenants_all if t.name.lower() == tenant_name_clean.lower() or t.slug == slug), None)
+        except Exception:
+            pass
+
+    if not tenant_obj:
+        print(f"[+] Criando Tenant '{tenant_name_clean}' no NetBox...")
+        try:
+            slug = re.sub(r'[^\w\-]', '_', tenant_name_clean.lower()).strip('_') or "tenant"
+            tenant_obj = nb.tenancy.tenants.create(name=tenant_name_clean, slug=slug)
+            print(f"[✔] Tenant '{tenant_name_clean}' criado com sucesso no NetBox!")
+        except Exception as e:
+            print(f"[!] Erro ao criar Tenant '{tenant_name_clean}': {e}")
+            try:
+                tenants_all = list(nb.tenancy.tenants.all())
+                tenant_obj = next((t for t in tenants_all if t.name.lower() == tenant_name_clean.lower()), None)
+            except Exception:
+                tenant_obj = None
+
+    return tenant_obj
+
+
 def abbreviate_ifname(if_name):
     """
     Abrevia os nomes das interfaces para manter o label do cabo dentro do limite de 100 caracteres do NetBox.
@@ -386,7 +428,7 @@ def delete_netbox_cable(nb, cable_obj, deleted_cable_ids=None):
     return False
 
 
-def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None, device_type_model=None, verify_ssl=None, sync_modules=None, driver=None):
+def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None, device_type_model=None, verify_ssl=None, sync_modules=None, driver=None, tenant_name=None, tenant=None):
     """
     Sincroniza os dados parseados do equipamento com a API do NetBox.
     Se sync_modules for informado (ex: ['interfaces', 'ips', 'vlans']), sincroniza apenas os modulos listados.
@@ -399,6 +441,7 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
     site_name = site_name or config.DEFAULT_SITE_NAME
     device_role = device_role or config.DEFAULT_DEVICE_ROLE
     device_type_model = device_type_model or config.DEFAULT_DEVICE_TYPE
+    tenant_name = tenant_name or tenant or getattr(config, 'DEFAULT_TENANT', None)
     vrf_name = config.VRF_NAME
     
     if verify_ssl is None:
@@ -414,6 +457,17 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
         return {'hostname': None, 'reassigned_ips': [], 'reassigned_roles': []}
 
     print(f"[*] Processando equipamento: {hostname}")
+
+    # 0. Garantir / Resolver Tenant (se especificado)
+    tenant_obj = None
+    tenant_id = None
+    if tenant_name:
+        tenant_obj = find_or_create_tenant(nb, tenant_name)
+        if tenant_obj:
+            tenant_id = getattr(tenant_obj, 'id', getattr(tenant_obj, 'pk', None))
+            if tenant_id is not None:
+                tenant_id = int(tenant_id)
+                print(f"[*] Tenant configurado para os recursos: {tenant_obj.name} (ID: {tenant_id})")
 
     # Rastreia IPs que foram reatribuídos de outra interface/equipamento para identificação de possíveis duplicidades
     ip_reassignments = []
@@ -547,6 +601,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 'tags': tag_objs,
                 'comments': comment_text
             }
+            if tenant_id:
+                device_kwargs['tenant'] = tenant_id
             if data.get('serial'):
                 device_kwargs['serial'] = data['serial']
 
@@ -591,6 +647,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
         if data.get('serial') and not getattr(device, 'serial', None):
             device.serial = data['serial']
             need_save = True
+
+        if tenant_id:
+            cur_dev_tenant = getattr(device, 'tenant', None)
+            cur_dev_tenant_id = getattr(cur_dev_tenant, 'id', getattr(cur_dev_tenant, 'pk', cur_dev_tenant)) if cur_dev_tenant else None
+            if cur_dev_tenant_id != tenant_id:
+                t_name = getattr(tenant_obj, 'name', tenant_name)
+                print(f"[➔] Atribuindo Tenant ao equipamento '{hostname}' -> '{t_name}'")
+                device.tenant = tenant_id
+                need_save = True
 
         if need_save:
             try:
@@ -659,6 +724,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 vlan_kwargs = {'vid': vid, 'name': vname, 'status': 'active'}
                 if target_role_id:
                     vlan_kwargs['role'] = target_role_id
+                if tenant_id:
+                    vlan_kwargs['tenant'] = tenant_id
                 vlan = nb.ipam.vlans.create(**vlan_kwargs)
             else:
                 need_save = False
@@ -679,6 +746,12 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         'new_role': target_role_name,
                         'previous_role': prev_role_name or 'Nenhuma'
                     })
+
+                if tenant_id and not getattr(vlan, 'tenant', None):
+                    t_name = getattr(tenant_obj, 'name', tenant_name)
+                    print(f"[➔] Atribuindo Tenant '{t_name}' para a VLAN {vid} ({vlan.name})")
+                    vlan.tenant = tenant_id
+                    need_save = True
 
                 if need_save:
                     vlan.save()
@@ -842,6 +915,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 v_kwargs = {'vid': untagged_vid, 'name': vname, 'status': 'active'}
                                 if target_role_id:
                                     v_kwargs['role'] = target_role_id
+                                if tenant_id:
+                                    v_kwargs['tenant'] = tenant_id
                                 u_obj = nb.ipam.vlans.create(**v_kwargs)
                             except Exception:
                                 u_obj = find_netbox_vlan(nb, untagged_vid, vname=vname, site_id=site_id)
@@ -879,6 +954,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                     v_kwargs = {'vid': v, 'name': vname, 'status': 'active'}
                                     if target_role_id:
                                         v_kwargs['role'] = target_role_id
+                                    if tenant_id:
+                                        v_kwargs['tenant'] = tenant_id
                                     v_obj = nb.ipam.vlans.create(**v_kwargs)
                                 except Exception:
                                     v_obj = find_netbox_vlan(nb, v, vname=vname, site_id=site_id)
@@ -1196,13 +1273,16 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 try:
                     if not ip_obj:
                         print(f"[+] Criando IP {canonical_ip_str} na VRF '{vrf_name}' (Interface: {iface_target.name})")
-                        ip_obj = nb.ipam.ip_addresses.create(
-                            address=canonical_ip_str,
-                            vrf=vrf_id,
-                            assigned_object_type='dcim.interface',
-                            assigned_object_id=iface_id,
-                            status='active'
-                        )
+                        ip_create_kwargs = {
+                            'address': canonical_ip_str,
+                            'vrf': vrf_id,
+                            'assigned_object_type': 'dcim.interface',
+                            'assigned_object_id': iface_id,
+                            'status': 'active'
+                        }
+                        if tenant_id:
+                            ip_create_kwargs['tenant'] = tenant_id
+                        ip_obj = nb.ipam.ip_addresses.create(**ip_create_kwargs)
                     else:
                         need_ip_save = False
                         cur_ip_str = getattr(ip_obj, 'address', '')
@@ -1262,6 +1342,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         cur_vrf_id = getattr(ip_obj.vrf, 'id', ip_obj.vrf) if getattr(ip_obj, 'vrf', None) else None
                         if cur_vrf_id != vrf_id:
                             ip_obj.vrf = vrf_id
+                            need_ip_save = True
+
+                        if tenant_id and not getattr(ip_obj, 'tenant', None):
+                            ip_obj.tenant = tenant_id
                             need_ip_save = True
 
                         if need_ip_save:
@@ -1334,12 +1418,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 ip_vrrp_obj = safe_get(nb.ipam.ip_addresses, address=canonical_vip, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=canonical_vip) or safe_get(nb.ipam.ip_addresses, address=full_vip, vrf_id=vrf_id) or safe_get(nb.ipam.ip_addresses, address=full_vip)
                 if not ip_vrrp_obj:
                     print(f"[+] Criando IP Virtual VRRP {canonical_vip} no NetBox...")
-                    ip_vrrp_obj = nb.ipam.ip_addresses.create(
-                        address=canonical_vip,
-                        vrf=vrf_id,
-                        status='active',
-                        description=f"VRRP Virtual IP Group {vr_id} ({vrrp_name or ''})"
-                    )
+                    vrrp_ip_kwargs = {
+                        'address': canonical_vip,
+                        'vrf': vrf_id,
+                        'status': 'active',
+                        'description': f"VRRP Virtual IP Group {vr_id} ({vrrp_name or ''})"
+                    }
+                    if tenant_id:
+                        vrrp_ip_kwargs['tenant'] = tenant_id
+                    ip_vrrp_obj = nb.ipam.ip_addresses.create(**vrrp_ip_kwargs)
                 
                 vip_id = getattr(ip_vrrp_obj, 'id', getattr(ip_vrrp_obj, 'pk', None))
                 
@@ -1355,7 +1442,14 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     if vrrp_name:
                         create_data['name'] = vrrp_name
                         create_data['description'] = f"VRRP {vrrp_name}"
-                    fhrp_group = fhrp_endpoint.create(**create_data)
+                    if tenant_id:
+                        create_data['tenant'] = tenant_id
+                    try:
+                        fhrp_group = fhrp_endpoint.create(**create_data)
+                    except Exception:
+                        if 'tenant' in create_data:
+                            create_data.pop('tenant', None)
+                            fhrp_group = fhrp_endpoint.create(**create_data)
                 else:
                     need_fg_save = False
                     if vrrp_name:
@@ -1468,6 +1562,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         }
                         if pw_id_val is not None:
                             create_data['identifier'] = pw_id_val
+                        if tenant_id:
+                            create_data['tenant'] = tenant_id
                         try:
                             l2vpn = l2vpn_endpoint.create(**create_data)
                         except Exception as create_err:
@@ -1487,6 +1583,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         if pw_id_val is not None and cur_ident_int != pw_id_val:
                             print(f"[➔] Atribuindo PW-ID {pw_id_val} ao Identifier da L2VPN VPWS '{l2vpn.name}'")
                             l2vpn.identifier = pw_id_val
+                            need_up = True
+
+                        if tenant_id and not getattr(l2vpn, 'tenant', None):
+                            l2vpn.tenant = tenant_id
                             need_up = True
 
                         if need_up:
@@ -1617,6 +1717,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         }
                         if pw_id_val is not None:
                             create_data['identifier'] = pw_id_val
+                        if tenant_id:
+                            create_data['tenant'] = tenant_id
                         try:
                             l2vpn = l2vpn_endpoint.create(**create_data)
                         except Exception as create_err:
@@ -1636,6 +1738,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         if pw_id_val is not None and cur_ident_int != pw_id_val:
                             print(f"[➔] Atribuindo PW-ID {pw_id_val} ao Identifier da L2VPN VPLS '{l2vpn.name}'")
                             l2vpn.identifier = pw_id_val
+                            need_up = True
+
+                        if tenant_id and not getattr(l2vpn, 'tenant', None):
+                            l2vpn.tenant = tenant_id
                             need_up = True
 
                         if need_up:
@@ -1793,6 +1899,8 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                                 'status': status_raw,
                                 'description': desc
                             }
+                            if tenant_id:
+                                create_kwargs['tenant'] = tenant_id
                             tunnel_obj = tunnels_endpoint.create(**create_kwargs)
                         except Exception as create_err:
                             print(f"[!] Erro ao criar Túnel VPN '{tun_name}': {create_err}")
@@ -1813,6 +1921,10 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
                         if desc and tunnel_obj.description != desc:
                             tunnel_obj.description = desc
+                            need_up = True
+
+                        if tenant_id and not getattr(tunnel_obj, 'tenant', None):
+                            tunnel_obj.tenant = tenant_id
                             need_up = True
 
                         if need_up:
@@ -1944,14 +2056,24 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                 cable_label = f"{hostname} {loc_abb} <-> {rem_dev.name} {rem_abb}"[:100]
                 print(f"[+] Criando Cabo LLDP: {loc_abb} ({hostname}) <---> {rem_abb} ({rem_dev.name})...")
                 try:
-                    new_cable = cable_endpoint.create(
-                        a_terminations=[{'object_type': 'dcim.interface', 'object_id': loc_if_id}],
-                        b_terminations=[{'object_type': 'dcim.interface', 'object_id': rem_if_id}],
-                        type=cable_type,
-                        status='connected',
-                        label=cable_label,
-                        description=f"LLDP auto-discovered: {cable_label}"
-                    )
+                    cable_kwargs = {
+                        'a_terminations': [{'object_type': 'dcim.interface', 'object_id': loc_if_id}],
+                        'b_terminations': [{'object_type': 'dcim.interface', 'object_id': rem_if_id}],
+                        'type': cable_type,
+                        'status': 'connected',
+                        'label': cable_label,
+                        'description': f"LLDP auto-discovered: {cable_label}"
+                    }
+                    if tenant_id:
+                        cable_kwargs['tenant'] = tenant_id
+                    try:
+                        new_cable = cable_endpoint.create(**cable_kwargs)
+                    except Exception as c_err:
+                        if tenant_id and 'tenant' in cable_kwargs:
+                            cable_kwargs.pop('tenant', None)
+                            new_cable = cable_endpoint.create(**cable_kwargs)
+                        else:
+                            raise c_err
                     loc_iface.cable = new_cable
                     created_cables_loc_ids.add(loc_if_id)
                 except Exception as cable_err:
@@ -2001,14 +2123,24 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                         cable_label = f"{hostname} {loc_abb} <-> {target_dev.name} {rem_abb}"[:100]
                         print(f"[+] Criando Cabo (via Descrição): {loc_abb} ({hostname}) <---> {rem_abb} ({target_dev.name})...")
                         try:
-                            new_cable = cable_endpoint.create(
-                                a_terminations=[{'object_type': 'dcim.interface', 'object_id': loc_if_id}],
-                                b_terminations=[{'object_type': 'dcim.interface', 'object_id': rem_if_id}],
-                                type=cable_type,
-                                status='connected',
-                                label=cable_label,
-                                description=f"Description auto-discovered: {cable_label}"
-                            )
+                            cable_kwargs = {
+                                'a_terminations': [{'object_type': 'dcim.interface', 'object_id': loc_if_id}],
+                                'b_terminations': [{'object_type': 'dcim.interface', 'object_id': rem_if_id}],
+                                'type': cable_type,
+                                'status': 'connected',
+                                'label': cable_label,
+                                'description': f"Description auto-discovered: {cable_label}"
+                            }
+                            if tenant_id:
+                                cable_kwargs['tenant'] = tenant_id
+                            try:
+                                new_cable = cable_endpoint.create(**cable_kwargs)
+                            except Exception as c_err:
+                                if tenant_id and 'tenant' in cable_kwargs:
+                                    cable_kwargs.pop('tenant', None)
+                                    new_cable = cable_endpoint.create(**cable_kwargs)
+                                else:
+                                    raise c_err
                             loc_iface.cable = new_cable
                             created_cables_loc_ids.add(loc_if_id)
                         except Exception as cable_err:

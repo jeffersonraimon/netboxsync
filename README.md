@@ -42,20 +42,22 @@
 
 | Módulo NetBox | Descrição das Capacidades |
 | :--- | :--- |
-| **Dispositivos (Devices)** | Criação e atualização de equipamentos com suporte a `serial`, `model`, `site` (POP), `role`, `tags` e timestamp nos comentários de auditoria. |
+| **Dispositivos (Devices)** | Criação e atualização de equipamentos com suporte a `serial`, `model`, `site` (POP), `role`, `tags`, `tenant` e timestamp nos comentários de auditoria. |
+| **Tenants (Clientes)** | Busca e criação automática de Tenants no NetBox (`/tenancy/tenants/`) e vinculação a Dispositivos, VLANs, Endereços IP, Circuitos L2VPN, Túneis e Cabos criados/atualizados. |
 | **Sites / POPs** | Criação e associação automática de Sites (POPs) no NetBox caso ainda não existam. |
-| **VLANs & Roles** | Sincronização de VLANs globais, reativação de VLANs inativas e categorização por Roles (`PTP-EQUIPAMENTOS`, `VPWS-TUNEIS`, `VPLS-TUNEIS`). |
+| **VLANs & Roles** | Sincronização de VLANs globais, vinculação ao Tenant, reativação de VLANs inativas e categorização por Roles (`PTP-EQUIPAMENTOS`, `VPWS-TUNEIS`, `VPLS-TUNEIS`). |
 | **Interfaces** | Mapeamento automático de tipos de interface (`100gbase-x-qsfp28`, `10gbase-x-sfpp`, `25gbase-x-sfp28`, `40gbase-x-qsfpp`, `1000base-t`, `lag`, `bridge`, `virtual`). Configuração de modos Access/Tagged, amarração de membros a LAGs/Bridges e interfaces pai (*Parent Interfaces*). |
-| **Túneis VPN (`/vpn/tunnels/`)** | Criação e sincronização automática de Túneis VPN no aplicativo NetBox VPN (3.5+) com mapeamento de **Encapsulation** (`wireguard`, `l2tp`, `pptp`, `openvpn`, `sstp`), status, descrição e associação de terminação (`Tunnel Termination`) no equipamento e interfaces. |
+| **Túneis VPN (`/vpn/tunnels/`)** | Criação e sincronização automática de Túneis VPN no aplicativo NetBox VPN (3.5+) com mapeamento de **Encapsulation** (`wireguard`, `l2tp`, `pptp`, `openvpn`, `sstp`), status, descrição, tenant e associação de terminação (`Tunnel Termination`) no equipamento e interfaces. |
 | **Transceivers / Inventário** | Extração de informações de transceivers ópticos (Vendor, Part Number, Serial) e vinculação aos fabricantes e interfaces físicas no NetBox. |
-| **Endereços IP & VRF** | Cadastro de IPs IPv4 e IPv6 (estáticos e dinâmicos) vinculados às interfaces físicas, subinterfaces L3 e Loopbacks na VRF Global, com resolução dinâmica de máscaras (CIDR) e atribuição automática do IP primário do dispositivo. |
+| **Endereços IP & VRF** | Cadastro de IPs IPv4 e IPv6 (estáticos e dinâmicos) vinculados ao Tenant, interfaces físicas, subinterfaces L3 e Loopbacks na VRF Global, com resolução dinâmica de máscaras (CIDR) e atribuição automática do IP primário do dispositivo. |
 | **VRRP / FHRP Groups** | Criação e atualização de grupos FHRP (VRRPv2/v3), IP virtual no NetBox IPAM, prioridades e associação às interfaces físicas/L3. |
-| **Circuitos L2VPN (VPWS / VPLS)** | Sincronização de túneis VPWS e VPLS no aplicativo VPN do NetBox (3.5+), atribuição de PW-IDs (identifiers) e terminadores em S-VLANs e C-VLANs para topologias Q-in-Q. |
-| **Descoberta de Cabos (Cables)** | Conexão automática de cabos entre dispositivos no NetBox utilizando vizinhos LLDP (`show lldp neighbors` / `/ip neighbor print terse`) e fallback por descrições de interface. |
+| **Circuitos L2VPN (VPWS / VPLS)** | Sincronização de túneis VPWS e VPLS no aplicativo VPN do NetBox (3.5+), vinculação ao Tenant, atribuição de PW-IDs (identifiers) e terminadores em S-VLANs e C-VLANs para topologias Q-in-Q. |
+| **Descoberta de Cabos (Cables)** | Conexão automática de cabos entre dispositivos no NetBox utilizando vizinhos LLDP (`show lldp neighbors` / `/ip neighbor print terse`), fallback por descrições de interface e associação ao Tenant. |
 
 ---
 
 ### 4. ⚙️ Recursos Avançados de Execução
+- **Vinculação de Tenant (`--tenant` / `-t`)**: Associa automaticamente o Tenant (Cliente) informado a todos os recursos criados ou atualizados que suportam vínculo de tenancy (Equipamento, VLANs, IPs, Circuitos L2VPN, Túneis e Cabos), criando o Tenant no NetBox caso ainda não exista.
 - **Modo Simulação (`--dry-run`)**: Executa o parsing dos dados e exibe o resumo completo sem aplicar nenhuma alteração no NetBox.
 - **Sincronização Modular (`--sync-modules`)**: Permite selecionar exatamente quais módulos sincronizar (ex: `--sync-modules vlans,interfaces,ips` ou `all`).
 - **Modo de Depuração (`--debug`)**: Exibe logs detalhados durante a coleta, parsing e comunicação com a API do NetBox.
@@ -118,6 +120,7 @@ netboxsync/
    ```env
    NETBOX_URL=https://netbox.suaempresa.com.br
    NETBOX_TOKEN=seu_token_api_netbox
+   NETBOX_TENANT=CLIENTE-X         # Opcional: Tenant padrão para associar aos objetos
    SSH_USER=admin
    SSH_PASS=sua_senha
    ```
@@ -145,6 +148,7 @@ netboxsync/
 | `--site` | `-s` | Nome/Slug do Site (POP) no NetBox. | Coleta automática |
 | `--role` | `-r` | Device Role no NetBox (ex: `SWITCH`, `Router`). | `SWITCH` |
 | `--device-type` | `-m`, `--model` | Modelo / Device Type no NetBox. | Coleta automática |
+| `--tenant` | `-t` | Nome/Slug do Tenant (Cliente) para vincular aos objetos criados no NetBox. | `.env` (`NETBOX_TENANT`) |
 | `--insecure` | `-k` | Ignora a verificação de certificado SSL (auto-assinado). | `False` |
 | `--dry-run` | - | Executa a simulação sem realizar alterações no NetBox. | `False` |
 | `--sync-modules` | `-m-sync` | Módulos a sincronizar (`vlans`, `interfaces`, `ips`, `vrrp`, `l2vpn`, `cables`, `transceivers`, `vpn_tunnels`) ou `all`. | `all` |
@@ -195,6 +199,11 @@ python3 main.py --host 10.0.0.1 -u admin -p 'MinhaSenha' --driver huawei_vrp \
 > **Dica (Huawei):** informe sempre `--device-type`/`--model` com o modelo real do
 > equipamento (ex: `NetEngine 8000 M8`, `S5731-H48T4XC`), pois o arquivo de
 > `display current-configuration` não contém o modelo de hardware do chassi.
+
+### 8. Sincronizar equipamento vinculando a um Tenant (Cliente)
+```bash
+python3 main.py --host 10.10.10.1 -P 22002 --driver routeros --device-type "CCR1036-8G-2S+" --tenant "CLIENTE-X"
+```
 
 ---
 
