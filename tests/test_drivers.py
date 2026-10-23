@@ -642,9 +642,413 @@ return
     assert parsed['vlans'].get(115) == 'TESTE-aaa'
 
 
+def test_huawei_driver_ne8000_interfaces_and_esn():
+    sample_cfg = """
+sysname NE8000-TEST
+#
+interface GE0/1/0
+ description UPLINK-1
+ ip address 192.0.2.1 255.255.255.252
+#
+interface 50GE0/2/0
+ description PORTA-50G
+#
+interface FlexE0/3/0
+ description FLEX-PORT
+#
+interface XGE0/4/0
+ description 10G-PORT
+#
+return
+"""
+    driver = get_driver('huawei_vrp')
+    raw = {
+        'config': sample_cfg,
+        'esn': 'ESN of master: 2102350TEST123',
+    }
+    parsed = driver.parse_data(raw)
+    assert parsed['hostname'] == 'NE8000-TEST'
+    assert parsed['serial'] == '2102350TEST123'
+    phys_names = [iface['name'] for iface in parsed['interfaces_physical']]
+    assert 'GE0/1/0' in phys_names
+    assert '50GE0/2/0' in phys_names
+    assert 'FlexE0/3/0' in phys_names
+    assert 'XGE0/4/0' in phys_names
+    ips = [ip['address'] for ip in parsed['ips']]
+    assert '192.0.2.1/30' in ips
 
 
+def test_main_cli_argument_vs():
+    import main
+    parser = main.create_parser()
+    args = parser.parse_args(["--host", "192.0.2.1", "--vs", "BRAS01"])
+    assert args.virtual_system == "BRAS01"
 
+    args_long = parser.parse_args(["--host", "192.0.2.1", "--virtual-system", "VS-INTERNET"])
+    assert args_long.virtual_system == "VS-INTERNET"
+
+
+def test_huawei_driver_virtual_system_vdc():
+    admin_cfg = """
+sysname BRAS-CHASSIS-01
+#
+virtual-system BRAS01
+ port-mode port
+ description BNG-BRAS-01
+ assign interface 100GE0/1/0
+ assign interface GE 0/2/0
+#
+virtual-system VS_BGP
+ port-mode port
+ description Border-Router
+ assign interface 10GE0/3/0
+#
+return
+"""
+    vs_bras_cfg = """
+sysname BRAS01
+#
+vlan batch 100
+#
+interface 100GE0/1/0.100
+ description CLIENTE-TESTE
+ vlan-type dot1q 100
+ ip address 198.51.100.1 255.255.255.0
+#
+return
+"""
+    driver = get_driver('huawei_vrp')
+    raw = {
+        'config': admin_cfg,
+        'config_vs_BRAS01': vs_bras_cfg,
+        'display virtual-system': """
+--------------------------------------------------------------------------------
+ID   Name             Status          Description                     Associated CPU-Template
+--------------------------------------------------------------------------------
+0    public           Running         Default public system           -
+1    BRAS01           Running         BNG-BRAS-01                     default
+2    VS_BGP           Running         Border-Router                   default
+--------------------------------------------------------------------------------
+"""
+    }
+    parsed = driver.parse_data(raw)
+
+    assert parsed['hostname'] == 'BRAS-CHASSIS-01'
+    assert 'logical_systems' in parsed
+    assert 'BRAS01' in parsed['logical_systems']
+    assert 'VS_BGP' in parsed['logical_systems']
+
+    # Interfaces atribuídas pelo bloco virtual-system ou pelo config_vs
+    vdc_bras = "BRAS-CHASSIS-01-BRAS01"
+    vdc_bgp = "BRAS-CHASSIS-01-VS_BGP"
+
+    iface_100ge = next((i for i in parsed['interfaces_physical'] if i['name'] == '100GE0/1/0'), None)
+    assert iface_100ge is not None
+    assert iface_100ge.get('vdc') == vdc_bras
+
+    iface_ge = next((i for i in parsed['interfaces_physical'] if i['name'] == 'GE0/2/0'), None)
+    assert iface_ge is not None
+    assert iface_ge.get('vdc') == vdc_bras
+
+    iface_10ge = next((i for i in parsed['interfaces_physical'] if i['name'] == '10GE0/3/0'), None)
+    assert iface_10ge is not None
+    assert iface_10ge.get('vdc') == vdc_bgp
+
+    # Subinterface criada no VS BRAS01
+    sub_100 = next((i for i in parsed['interfaces_l3'] if i['name'] == '100GE0/1/0.100'), None)
+    assert sub_100 is not None
+    assert sub_100.get('vdc') == vdc_bras
+
+    # IP criado dentro do VS BRAS01
+    ips = [ip['address'] for ip in parsed['ips']]
+    assert '198.51.100.1/24' in ips
+
+    # VLAN criada dentro do VS BRAS01
+    assert 100 in parsed['vlans']
+
+
+def test_huawei_driver_virtual_system_ne8000_pv_plane_and_ip_brief():
+    admin_cfg = """
+sysname BRAS-CHASSIS-02
+#
+virtual-system VS_CORP pv-plane
+ description Servico-Corporativo
+ assign interface GigabitEthernet0/7/3
+ assign interface GigabitEthernet0/7/4
+#
+return
+"""
+    vs_corp_cfg = """
+sysname VS_CORP
+#
+interface GigabitEthernet0/7/3.100
+ description LINK-MATRIZ
+ vlan-type dot1q 100
+ ip address 192.0.2.1 24
+ ip address 192.0.2.2 24 sub
+#
+return
+"""
+    vs_corp_ip_brief = """
+Interface                         IP Address/Mask      Physical   Protocol  
+GigabitEthernet0/7/3.100          192.0.2.1/24         up         up        
+LoopBack0                         10.0.0.1/32          up         up(s)     
+GigabitEthernet0/7/4              unassigned           *down      down      
+"""
+    vs_corp_int_desc = """
+Interface                   PHY      Protocol Description
+GigabitEthernet0/7/3        up       up       UPLINK-CORP-01
+GigabitEthernet0/7/4        *down    down     RESERVA-EXPANSAO
+"""
+    driver = get_driver('huawei_vrp')
+    raw = {
+        'config': admin_cfg,
+        'config_vs_VS_CORP': vs_corp_cfg,
+        'ip_brief_vs_VS_CORP': vs_corp_ip_brief,
+        'int_desc_vs_VS_CORP': vs_corp_int_desc,
+        'display virtual-system': """
+Total Virtual System: 2
+--------------------------------------------------------------------------------
+ID   Name             Status          Description                     Associated CPU-Template
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Default admin system            -
+1    VS_CORP          Running         Servico-Corporativo             default
+--------------------------------------------------------------------------------
+"""
+    }
+    parsed = driver.parse_data(raw)
+
+    assert parsed['hostname'] == 'BRAS-CHASSIS-02'
+    assert 'logical_systems' in parsed
+    assert 'VS_CORP' in parsed['logical_systems']
+
+    vdc_corp = "BRAS-CHASSIS-02-VS_CORP"
+
+    # Interfaces atribuídas
+    iface_73 = next((i for i in parsed['interfaces_physical'] if i['name'] == 'GigabitEthernet0/7/3'), None)
+    assert iface_73 is not None
+    assert iface_73.get('vdc') == vdc_corp
+    assert iface_73.get('description') == 'UPLINK-CORP-01'
+
+    # Subinterface e LoopBack criadas no VS
+    sub_100 = next((i for i in parsed['interfaces_l3'] if i['name'] == 'GigabitEthernet0/7/3.100'), None)
+    assert sub_100 is not None
+    assert sub_100.get('vdc') == vdc_corp
+    assert sub_100.get('description') == 'LINK-MATRIZ'
+
+    loop0 = next((i for i in parsed['interfaces_l3'] if i['name'] == 'LoopBack0'), None)
+    assert loop0 is not None
+    assert loop0.get('vdc') == vdc_corp
+
+    # IPs extraídos (tanto do config_vs quanto do ip_brief)
+    ips = [ip['address'] for ip in parsed['ips']]
+    assert '192.0.2.1/24' in ips
+    assert '192.0.2.2/24' in ips
+    assert '10.0.0.1/32' in ips
+
+
+def test_huawei_driver_fetch_data_auto_discovers_virtual_systems(monkeypatch):
+    """Valida que o fetch_data identifica Virtual Systems e coleta as configurações de cada um."""
+    driver = get_driver('huawei_vrp')
+
+    executed_commands = []
+
+    class DummySession:
+        def __init__(self, *args, **kwargs):
+            pass
+        def connect(self):
+            pass
+        def close(self):
+            pass
+        def send_command(self, cmd, **kwargs):
+            executed_commands.append(cmd)
+            if cmd == "display virtual-system":
+                return """
+Total Virtual System: 2
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    VS_CLIENTE_A     Running         Virtual System Cliente A
+--------------------------------------------------------------------------------
+"""
+            if cmd == "display current-configuration":
+                return "sysname TEST-ADMIN\n#\n"
+            return ""
+
+    monkeypatch.setattr("drivers.huawei_vrp.SSHClientSession", DummySession)
+
+    outputs = driver.fetch_data(host="192.0.2.1", username="admin", password="password")
+
+    assert "switch virtual-system VS_CLIENTE_A" in executed_commands
+    assert "quit" in executed_commands
+    assert 'config_vs_VS_CLIENTE_A' in outputs
+
+
+def test_huawei_interface_name_normalization():
+    from drivers.huawei_vrp import normalize_interface_name
+    assert normalize_interface_name("GigabitEthernet0/7/5.2124(10G)") == "GigabitEthernet0/7/5.2124"
+    assert normalize_interface_name("100GE0/1/0(100G)") == "100GE0/1/0"
+    assert normalize_interface_name("GE0/2/0(GE)") == "GE0/2/0"
+    assert normalize_interface_name("Eth-Trunk0.28") == "Eth-Trunk0.28"
+
+
+def test_huawei_find_matching_vs():
+    from drivers.huawei_vrp import find_matching_vs
+    available = ["vs-bgp", "VS_CORP", "VS-CLIENTE-TESTE"]
+    assert find_matching_vs("vs-bgp", available) == "vs-bgp"
+    assert find_matching_vs("VS-BGP", available) == "vs-bgp"
+    assert find_matching_vs("VS-BGP-ANY-LABEL", available) == "vs-bgp"
+    assert find_matching_vs("cliente-teste", available) == "VS-CLIENTE-TESTE"
+    assert find_matching_vs("INEXISTENTE", available) is None
+
+
+def test_huawei_extract_virtual_systems_ignores_error_and_info_lines():
+    from drivers.huawei_vrp import extract_virtual_systems, is_valid_vs_name
+    assert not is_valid_vs_name("Error:")
+    assert not is_valid_vs_name("Info:")
+    assert not is_valid_vs_name("Warning:")
+    assert not is_valid_vs_name("Admin-VS")
+    assert not is_valid_vs_name("public")
+    assert is_valid_vs_name("vs-bgp")
+    assert is_valid_vs_name("VS-CLIENTE-A")
+
+    raw_output = """
+Info: The virtual system feature is enabled.
+Error: Operation timed out on standby plane.
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    vs-bgp           Running         BGP Routing System
+2    VS-CORP          Running         Corporate VS
+--------------------------------------------------------------------------------
+Total Virtual System: 3
+Warning: License expiring in 30 days.
+"""
+    vss = extract_virtual_systems(raw_output)
+    assert "vs-bgp" in vss
+    assert "VS-CORP" in vss
+    assert "Error:" not in vss
+    assert "Info:" not in vss
+    assert "Warning:" not in vss
+    assert "Admin-VS" not in vss
+    assert "public" not in vss
+
+
+def test_huawei_ipv6_and_single_vs_support():
+    """Valida o suporte a IPv6 brief multi-linha, normalizacao de sufixos (10G) e execucao de VS ativo."""
+    driver = get_driver('huawei_vrp')
+
+    ip_brief = """
+*down: administratively down
+The number of interface that is UP in Physical is 4
+Interface                         IP Address/Mask      Physical   Protocol VPN 
+Eth-Trunk0.28                     192.0.2.1/30         up         up       --  
+GigabitEthernet0/7/5.2124(10G)    198.51.100.1/30      up         up       --  
+LoopBack0                         203.0.113.1/32       up         up(s)    --  
+Virtual-Ethernet0/3/31.4000       10.0.0.1/30          up         up       --  
+"""
+
+    ipv6_brief = """
+*down: administratively down
+Interface                    Physical              Protocol VPN
+Eth-Trunk0.28                up                    up       --      
+[IPv6 Address/Prefix Length] 2001:db8:1::2/64  
+[IPv6 Address/Prefix Length] fe80::2a11:ecff:fe6b:916a/10
+GigabitEthernet0/7/5.2124    up                    up       --      
+[IPv6 Address/Prefix Length] 2001:db8:2::2/64  
+LoopBack0                    up                    up(s)    --      
+[IPv6 Address/Prefix Length] 2001:db8:3::1/128  
+Virtual-Ethernet0/3/31.4000  up                    up       --      
+[IPv6 Address/Prefix Length] 2001:db8:4::1/64
+"""
+
+    raw = {
+        'active_vs': 'vs-bgp',
+        'config': 'sysname ROUTER-TEST\n#\n',
+        'esn': 'ESN of master: 2102353TESTSERIAL01',
+        'version': 'HUAWEI NetEngine 8000 uptime is 10 weeks',
+        'ip_brief': ip_brief,
+        'ipv6_brief': ipv6_brief,
+        'vs': """
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    vs-bgp           Running         BGP Border
+--------------------------------------------------------------------------------
+"""
+    }
+
+    parsed = driver.parse_data(raw)
+    assert parsed['hostname'] == 'ROUTER-TEST'
+    assert parsed['serial'] == '2102353TESTSERIAL01'
+    assert 'vs-bgp' in parsed['logical_systems']
+
+    vdc_expected = "ROUTER-TEST-vs-bgp"
+
+    # Verifica que interfaces foram normalizadas e vinculadas ao VDC
+    iface_names = {i['name'] for i in parsed['interfaces_l3']}
+    assert "GigabitEthernet0/7/5.2124" in iface_names
+    assert "GigabitEthernet0/7/5.2124(10G)" not in iface_names
+    assert "Eth-Trunk0.28" in iface_names
+    assert "Virtual-Ethernet0/3/31.4000" in iface_names
+
+    for iface in parsed['interfaces_l3']:
+        assert iface.get('vdc') == vdc_expected
+
+    # Verifica se os IPs IPv4 e IPv6 foram extraídos para as interfaces corretas
+    ips_map = {(ip['interface'], ip['address']) for ip in parsed['ips']}
+    assert ("GigabitEthernet0/7/5.2124", "198.51.100.1/30") in ips_map
+    assert ("GigabitEthernet0/7/5.2124", "2001:db8:2::2/64") in ips_map
+    assert ("Eth-Trunk0.28", "192.0.2.1/30") in ips_map
+    assert ("Eth-Trunk0.28", "2001:db8:1::2/64") in ips_map
+    assert ("LoopBack0", "203.0.113.1/32") in ips_map
+    assert ("LoopBack0", "2001:db8:3::1/128") in ips_map
+
+    # Garante que link-local fe80:: foi completamente ignorado
+    assert not any(ip['address'].lower().startswith('fe80') for ip in parsed['ips'])
+
+
+def test_huawei_fetch_data_with_specific_vs_matches_and_switches(monkeypatch):
+    """Valida que quando --vs e fornecido, dados do chassi sao coletados no Admin-VS e depois alterna para o VS."""
+    driver = get_driver('huawei_vrp')
+    executed_commands = []
+
+    class DummySession:
+        def __init__(self, *args, **kwargs):
+            pass
+        def connect(self):
+            pass
+        def close(self):
+            pass
+        def send_command(self, cmd, **kwargs):
+            executed_commands.append(cmd)
+            if cmd == "display virtual-system":
+                return """
+--------------------------------------------------------------------------------
+ID   Name             Status          Description
+--------------------------------------------------------------------------------
+0    Admin-VS         Running         Root admin
+1    vs-bgp           Running         BGP Routing System
+--------------------------------------------------------------------------------
+"""
+            if cmd == "display esn":
+                return "ESN of master: 2102353TESTESN99"
+            if cmd == "display current-configuration":
+                return "sysname TEST-VS-ROUTER\n#\n"
+            return ""
+
+    monkeypatch.setattr("drivers.huawei_vrp.SSHClientSession", DummySession)
+
+    outputs = driver.fetch_data(host="192.0.2.1", username="admin", password="password", vs="VS-BGP-CLIENTE")
+
+    assert "display esn" in executed_commands
+    assert "switch virtual-system vs-bgp" in executed_commands
+    assert "display ipv6 interface brief" in executed_commands
+    assert "quit" in executed_commands
+    assert outputs.get('active_vs') == 'vs-bgp'
 
 
 

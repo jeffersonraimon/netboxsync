@@ -84,12 +84,16 @@ class SSHClientSession:
         buf = ""
         cmd_start = time.time()
         cmd_clean = command.strip()
+        more_regex = re.compile(r'---- More(?:[^\r\n]*)----|--More--|-- More --|---\(more(?:\s*\d+%)?\)---', re.IGNORECASE)
         while time.time() - cmd_start < timeout:
             if self.channel.recv_ready():
                 chunk = self.channel.recv(16384).decode('utf-8', errors='ignore')
                 buf += chunk
                 self._log(chunk)
-                if expect_regex and re.search(expect_regex, buf):
+                if more_regex.search(buf[-150:]):
+                    self.channel.send(' ')
+                    cmd_start = time.time()
+                elif expect_regex and re.search(expect_regex, buf):
                     lines = [l.strip() for l in buf.splitlines() if l.strip()]
                     if len(lines) > 1 or (lines and cmd_clean not in lines[-1]):
                         break

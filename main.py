@@ -14,19 +14,25 @@ from drivers import get_driver
 from netbox_sync.sync_engine import sync_to_netbox
 
 
-def print_parsed_summary(parsed_data, default_device_type="", tenant_name=None, vrf_name=None):
+def print_parsed_summary(parsed_data, default_device_type="", tenant_name=None, vrf_name=None, virtual_system=None):
     """
     Exibe no terminal um resumo completo contendo todos os dados extraídos pelo driver.
     """
     tags_str = ", ".join(sorted(parsed_data.get('tags') or [])) or "Nenhuma"
     print("\n================ RESUMO DAS INFORMAÇÕES EXTRAÍDAS ================")
     print(f" Hostname               : {parsed_data.get('hostname') or 'Não identificado'}")
+    if virtual_system:
+        print(f" Virtual System (VS)    : {virtual_system}")
     if tenant_name:
         print(f" Tenant (Cliente)       : {tenant_name}")
     if vrf_name:
         print(f" VRF                    : {vrf_name}")
     print(f" Número de Série        : {parsed_data.get('serial') or 'Não identificado'}")
     print(f" Modelo Identificado    : {parsed_data.get('model') or default_device_type}")
+    vdcs = parsed_data.get('logical_systems') or {}
+    if vdcs:
+        vdc_names = ", ".join(sorted(vdcs.keys()))
+        print(f" Contextos Virtuais/VDC : {len(vdcs)} ({vdc_names})")
     print(f" Tags / Protocolos      : {tags_str}")
     print(f" Interfaces Físicas     : {len(parsed_data.get('interfaces_physical', []))}")
     print(f" Interfaces L3          : {len(parsed_data.get('interfaces_l3', []))}")
@@ -65,7 +71,8 @@ def process_single_host(host, args, password, driver):
             username=args.username,
             password=password,
             port=ssh_port,
-            debug=getattr(args, 'debug', False)
+            debug=getattr(args, 'debug', False),
+            vs=getattr(args, 'virtual_system', None)
         )
     except Exception as e:
         print(f"[!] Erro SSH ao conectar no host {host}: {e}")
@@ -83,7 +90,13 @@ def process_single_host(host, args, password, driver):
         return False, err_msg
 
     # Resumo dos Dados Coletados
-    print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant, vrf_name=args.vrf)
+    print_parsed_summary(
+        parsed_data,
+        default_device_type=args.device_type,
+        tenant_name=args.tenant,
+        vrf_name=args.vrf,
+        virtual_system=getattr(args, 'virtual_system', None)
+    )
 
     if args.dry_run:
         print(f"[i] Modo Dry-Run ativo para {hostname}. Nenhuma alteração foi realizada no NetBox.")
@@ -134,6 +147,7 @@ def create_parser():
     ssh_group.add_argument("--username", "-u", help="Usuário SSH do equipamento", default=os.getenv("SSH_USER", "admin"))
     ssh_group.add_argument("--password", "-p", help="Senha SSH do equipamento", default=os.getenv("SSH_PASS", ""))
     ssh_group.add_argument("--port", "-P", type=int, help="Porta SSH remota (Padrão: 22 ou porta via env SSH_PORT)", default=int(os.getenv("SSH_PORT", "22")))
+    ssh_group.add_argument("--vs", "--virtual-system", dest="virtual_system", help="Nome do Virtual System (VS) para alternar a partir do Admin-VS (ex: BRAS01, VS-PROD)", default=None)
     ssh_group.add_argument("--debug", "-d", action="store_true", help="Ativar logs de debug SSH detalhados")
 
     # Opções NetBox
@@ -217,7 +231,13 @@ def main():
         parsed_data = driver.parse_data(config_content)
 
         hostname = parsed_data.get('hostname') or args.file
-        print_parsed_summary(parsed_data, default_device_type=args.device_type, tenant_name=args.tenant, vrf_name=args.vrf)
+        print_parsed_summary(
+            parsed_data,
+            default_device_type=args.device_type,
+            tenant_name=args.tenant,
+            vrf_name=args.vrf,
+            virtual_system=getattr(args, 'virtual_system', None)
+        )
 
         if args.dry_run:
             print("[i] Modo Dry-Run ativo. Nenhuma alteração foi realizada no NetBox.")

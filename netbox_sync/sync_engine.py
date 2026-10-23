@@ -690,25 +690,56 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
 
     device_id = getattr(device, 'id', getattr(device, 'pk', None))
 
-    # 3.5. Sincronizar Virtual Device Contexts (VDCs / Logical Systems)
+    # 3.5. Sincronizar Virtual Device Contexts (VDCs / Logical Systems / Virtual Systems)
     vdcs_cache = {}
+
+    # Limpeza preventiva de VDCs espúrios gerados por mensagens de erro no chassi (ex: *-Error:, *-Info:)
+    try:
+        existing_vdcs = list(nb.dcim.virtual_device_contexts.filter(device_id=device_id))
+        for old_vdc in existing_vdcs:
+            v_name = getattr(old_vdc, 'name', '')
+            if isinstance(v_name, str) and any(v_name.lower().endswith(s) for s in ('-error:', '-info:', '-warning:', '-error', '-info', '-warning')):
+                print(f"[-] Removendo Virtual Device Context espúrio '{v_name}' do NetBox...")
+                try:
+                    old_vdc.delete()
+                except Exception as del_err:
+                    print(f"[!] Erro ao remover VDC espúrio '{v_name}': {del_err}")
+    except Exception:
+        pass
+
     logical_systems = data.get('logical_systems', {})
     if logical_systems:
-        for ls_name in logical_systems.keys():
-            vdc_name = f"{hostname}-{ls_name}"
+        for ls_name in list(logical_systems.keys()):
+            if not ls_name or any(ls_name.lower().startswith(p) for p in ('error', 'info', 'warning', 'null', 'none')):
+                continue
+            if any(c in ls_name for c in (':', ' ', '\t', '\r', '\n')):
+                continue
+            vdc_name = ls_name if ls_name.startswith(f"{hostname}-") else f"{hostname}-{ls_name}"
             vdc_obj = safe_get(nb.dcim.virtual_device_contexts, name=vdc_name, device_id=device_id)
             if not vdc_obj:
                 print(f"[+] Criando Virtual Device Context '{vdc_name}' no NetBox para {hostname}...")
                 try:
-                    vdc_obj = nb.dcim.virtual_device_contexts.create(
-                        name=vdc_name,
-                        device=device_id,
-                        status='active'
-                    )
+                    create_payload = {
+                        'name': vdc_name,
+                        'device': device_id,
+                        'status': 'active'
+                    }
+                    if tenant_id:
+                        create_payload['tenant'] = tenant_id
+                    vdc_obj = nb.dcim.virtual_device_contexts.create(**create_payload)
                 except Exception as vdc_err:
-                    print(f"[!] Erro ao criar VDC '{vdc_name}': {vdc_err}")
+                    try:
+                        vdc_obj = nb.dcim.virtual_device_contexts.create(
+                            name=vdc_name,
+                            device=device_id,
+                            status='active'
+                        )
+                    except Exception:
+                        print(f"[!] Erro ao criar VDC '{vdc_name}': {vdc_err}")
             if vdc_obj:
                 vdcs_cache[vdc_name] = getattr(vdc_obj, 'id', getattr(vdc_obj, 'pk', None))
+                # Também indexa pelo nome simples do VS/LS para facilitar lookup
+                vdcs_cache[ls_name] = getattr(vdc_obj, 'id', getattr(vdc_obj, 'pk', None))
 
     # 4. Garantir criação das VLAN Roles no NetBox
     vlan_roles_cache = {}
@@ -1278,9 +1309,15 @@ def sync_to_netbox(data, url=None, token=None, site_name=None, device_role=None,
                     ip_iface_obj = ipaddress.ip_interface(raw_ip_str)
                     canonical_ip_str = str(ip_iface_obj)
                     clean_host_ip = str(ip_iface_obj.ip)
+                    is_link_local = getattr(ip_iface_obj.ip, 'is_link_local', False)
                 except Exception:
                     canonical_ip_str = raw_ip_str
                     clean_host_ip = raw_ip_str.split('/')[0]
+                    is_link_local = clean_host_ip.lower().startswith('fe80')
+
+                # Ignora endereços IPv6 Link-Local (fe80::/10)
+                if is_link_local or clean_host_ip.lower().startswith('fe80'):
+                    continue
 
                 # Se for Network ID (ex: 2001:db8:1::/64 ou 10.0.0.0/24), não deve ser atribuído à interface
                 if canonical_ip_str.endswith('::/64') or canonical_ip_str.endswith('.0/24') or raw_ip_str.endswith('::/64') or raw_ip_str.endswith('.0/24'):

@@ -123,7 +123,7 @@ Quando você quiser adicionar um fabricante novo no código (ex: Huawei VRP), ba
    Transceivers / Inventário SFP |      ✅ Sim (show inventory)      |      ✅ Sim (phy-option router /      | ✅ Sim (chassis hardware + pic fpc- |       ❌ Não implementado ([])
                                  |                                   |          transceiver switch)          |           slot cruzados)            |
    Vizinhos LLDP                 |  ✅ Sim (JSON ou regex tabular)   | ✅ Sim (display lldp neighbor brief)  |        ✅ Sim (display json)        |   ✅ Sim (/ip neighbor print terse)
-   Logical Systems / VDCs        |              ❌ Não               |                ❌ Não                 |    ✅ Sim (set logical-systems)     |                ❌ Não
+   Logical Systems / VDCs        |              ❌ Não               |    ✅ Sim (virtual-system / VDC)     |    ✅ Sim (set logical-systems)     |                ❌ Não
    Tratamento de deactivate      |                N/A                |                  N/A                  |   ✅ Sim (ignora blocos inativos)   |     ✅ Sim (filtra disabled=yes)
    Deteção Dinâmica de Tags      |   ✅ Sim (BGP, OSPF, LDP, RSVP,   |  ✅ Sim (BGP, OSPF, ISIS, LDP, etc.)  | ✅ Sim (BGP, OSPF, LDP, RSVP, etc.)  |    ✅ Sim (BGP, OSPF, MPLS, VRRP)
                                  |               etc.)               |                                       |                                     |
@@ -134,7 +134,7 @@ Quando você quiser adicionar um fabricante novo no código (ex: Huawei VRP), ba
   de transceivers ópticos.
   2. Especialidade do JunOS: É o único com suporte nativo a Logical Systems (atribuindo VDCs no NetBox) e leitura de configuração em modo set com remoção de itens sob deactivate, além de
   um parser de transceivers que consulta slots PIC individuais para descobrir o fabricante real de ópticas de terceiros. Ainda não tem parsers de L2VPN (VPWS/VPLS) e VRRP implementados.
-  3. Especialidade do Huawei VRP: Possui tratamento dual tanto para switches (VRP5) quanto roteadores/BNG (VRP8), cobrindo de forma completa QinQ com C-VLANs para clientes, VPWS/VPLS e
+  3. Especialidade do Huawei VRP: Possui tratamento completo tanto para switches (VRP5) quanto roteadores/BNG (VRP8), suporte nativo a Virtual Systems (criando VDCs no NetBox), particionamento de chassi (Admin-VS e Service VS), QinQ com C-VLANs para clientes, VPWS/VPLS e
   comando diferenciado de transceivers (phy-option vs transceiver).
   4. Especialidade do Datacom DmOS: Possui suporte aprofundado a pseudowires legados e modernos em DmOS, com recuperação automática de JSONs truncados ou com vírgulas faltantes gerados
   pelo CLI da Datacom.
